@@ -14,18 +14,11 @@
       <p style="text-align: center; color: #666; margin-bottom: 20px; font-size: 0.9rem;">
         승인된 사용자만 접근할 수 있습니다.
       </p>
-      <form id="authForm" style="display: flex; flex-direction: column; gap: 15px;">
-        <label>
-          <span style="font-weight: 500;">이메일</span>
-          <input type="email" id="email" required placeholder="example@email.com" class="field" style="width: 100%; box-sizing: border-box; padding: 10px; margin-top: 5px;" />
-        </label>
-        <label>
-          <span style="font-weight: 500;">비밀번호</span>
-          <input type="password" id="password" required placeholder="비밀번호 입력" class="field" style="width: 100%; box-sizing: border-box; padding: 10px; margin-top: 5px;" />
-        </label>
-        <button type="submit" class="btn-primary" id="loginBtn" style="margin-top: 10px;">로그인</button>
-        <button type="button" class="btn-secondary" id="signupBtn">회원가입 요청하기</button>
-      </form>
+      <div style="display: flex; flex-direction: column; gap: 15px;">
+        <button type="button" class="btn-primary" id="googleLoginBtn" style="background-color: #4285F4;">
+          구글 계정으로 로그인 (Google)
+        </button>
+      </div>
       <div id="authStatus" style="margin-top: 15px; color: #e11d48; text-align: center; font-weight: 500; font-size: 0.9rem;"></div>
     </div>
   </main>
