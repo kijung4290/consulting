@@ -230,7 +230,7 @@ async function summarizeTranscript(transcriptText) {
   }
 
   const requestBody = {
-    model: "gpt-4o-mini", // user wrote gpt-5.4-mini, gracefully handling as gpt-4o-mini (the cheapest valid one)
+    model: "gpt-5.4-mini", // user wrote gpt-5.4-mini, gracefully handling as gpt-4o-mini (the cheapest valid one)
     messages: [
       { role: "system", content: "당신은 전문 상담가입니다. 제공된 음성 기록 텍스트를 분석하여, [상담 일자/시간], [내담자 주요 호소 문제], [상담 주요 내용], [상담자 의견 및 향후 계획] 등 체계적인 상담 일지 형태로 요약해 주세요. 전문적이고 간결한 어조를 사용하세요." },
       { role: "user", content: transcriptText }
