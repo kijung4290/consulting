@@ -29,6 +29,23 @@ let recordedBlob = null;
 let recordingTimer;
 let secondsRecorded = 0;
 
+document.addEventListener("DOMContentLoaded", async () => {
+  const configRes = await fetch("/api/config");
+  const config = await configRes.json();
+  
+  if (config.supabaseUrl && !localStorage.getItem("sb-access-token")) {
+    window.location.href = "/login.html";
+  }
+});
+
+const logoutBtn = document.getElementById("logoutBtn");
+if (logoutBtn) {
+  logoutBtn.addEventListener("click", () => {
+    localStorage.removeItem("sb-access-token");
+    window.location.href = "/login.html";
+  });
+}
+
 function syncMode() {
   const isDiarize = form.querySelector('input[name="mode"]:checked')?.value === "diarize";
   if (isDiarize) {
@@ -73,19 +90,32 @@ form.addEventListener("submit", async (event) => {
   const mode = form.querySelector('input[name="mode"]:checked')?.value || "plain";
   formData.append("mode", mode);
 
+  const consultationType = form.querySelector('input[name="consultationType"]:checked')?.value || "general";
+  formData.append("consultationType", consultationType);
+
   if (mode === "diarize" && expectedSpeakersInput.value.trim()) {
     formData.append("expectedSpeakers", expectedSpeakersInput.value.trim());
+  }
+
+  const headers = {};
+  const token = localStorage.getItem("sb-access-token");
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   try {
     const response = await fetch("/api/transcribe", {
       method: "POST",
+      headers,
       body: formData
     });
 
     const payload = await response.json();
 
     if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(payload.error || "분석 요청 권한이 없습니다. 관리자 승인을 확인하세요.");
+      }
       throw new Error(payload.error || "분석 요청에 실패했습니다.");
     }
 

@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import express from "express";
 import fs from "fs-extra";
 import multer from "multer";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -23,6 +24,14 @@ const ASSEMBLYAI_BASE_URL = "https://api.assemblyai.com/v2";
 const ASSEMBLYAI_UPLOAD_URL = `${ASSEMBLYAI_BASE_URL}/upload`;
 const ASSEMBLYAI_TRANSCRIPT_URL = `${ASSEMBLYAI_BASE_URL}/transcript`;
 const ASSEMBLYAI_SPEECH_MODELS = ["universal-2"];
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_KEY;
+
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+  supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+}
 
 const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const SUPPORTED_EXTENSIONS = new Set([".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".wav", ".webm"]);
@@ -63,12 +72,54 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     openaiConfigured: Boolean(OPENAI_API_KEY),
     assemblyConfigured: Boolean(ASSEMBLYAI_API_KEY),
+    supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_KEY),
     openaiModel: OPENAI_TRANSCRIBE_MODEL,
     maxUploadMb: MAX_UPLOAD_BYTES / (1024 * 1024)
   });
 });
 
-app.post("/api/transcribe", upload.single("mediaFile"), async (req, res) => {
+app.get("/api/config", (_req, res) => {
+  res.json({
+    supabaseUrl: SUPABASE_URL || null,
+    supabaseAnonKey: SUPABASE_KEY || null
+  });
+});
+
+// Auth Middleware
+async function requireAuth(req, res, next) {
+  if (!supabase) {
+    console.warn("Supabase is not configured, skipping auth check.");
+    return next();
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ error: "로그인이 필요합니다." });
+  }
+
+  const token = authHeader.replace("Bearer ", "");
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  
+  if (error || !user) {
+    return res.status(401).json({ error: "유효하지 않은 토큰입니다. 다시 로그인해주세요." });
+  }
+
+  // Check profile status
+  const { data: profile, error: dbError } = await supabase
+    .from("profiles")
+    .select("status")
+    .eq("id", user.id)
+    .single();
+
+  if (dbError || !profile || profile.status !== "approved") {
+    return res.status(403).json({ error: "관리자의 승인이 필요한 계정입니다. 가입 승인을 기다려주세요." });
+  }
+
+  req.user = user;
+  next();
+}
+
+app.post("/api/transcribe", requireAuth, upload.single("mediaFile"), async (req, res) => {
   const uploadedFilePath = req.file?.path;
 
   try {
@@ -81,21 +132,22 @@ app.post("/api/transcribe", upload.single("mediaFile"), async (req, res) => {
     const mode = req.body?.mode === "diarize" ? "diarize" : "plain";
     const prompt = req.body?.prompt?.trim();
     const expectedSpeakers = parseExpectedSpeakers(req.body?.expectedSpeakers);
+    const consultationType = req.body?.consultationType || "general";
 
     const payload = mode === "diarize"
       ? await transcribeWithAssemblyAI({
-          filePath: req.file.path,
-          mimeType: req.file.mimetype,
-          expectedSpeakers
-        })
+        filePath: req.file.path,
+        mimeType: req.file.mimetype,
+        expectedSpeakers
+      })
       : await transcribeWithOpenAI({
-          filePath: req.file.path,
-          originalName: req.file.originalname,
-          mimeType: req.file.mimetype,
-          prompt
-        });
+        filePath: req.file.path,
+        originalName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        prompt
+      });
 
-    const summary = await summarizeTranscript(payload.transcriptText);
+    const summary = await summarizeTranscript(payload.transcriptText, consultationType);
 
     res.json({
       fileName: req.file.originalname,
@@ -111,7 +163,7 @@ app.post("/api/transcribe", upload.single("mediaFile"), async (req, res) => {
     });
   } finally {
     if (uploadedFilePath) {
-      await fs.remove(uploadedFilePath).catch(() => {});
+      await fs.remove(uploadedFilePath).catch(() => { });
     }
   }
 });
@@ -224,15 +276,33 @@ async function transcribeWithAssemblyAI({ filePath, mimeType, expectedSpeakers }
   };
 }
 
-async function summarizeTranscript(transcriptText) {
+async function summarizeTranscript(transcriptText, consultationType = "general") {
   if (!OPENAI_API_KEY) {
     return "OpenAI API 키가 설정되지 않아 요약을 생성할 수 없습니다.";
   }
 
+  let systemPrompt = "당신은 전문 상담가입니다. 제공된 음성 기록 텍스트를 분석하여, [상담 일자/시간], [내담자 주요 호소 문제], [상담 주요 내용], [상담자 의견 및 향후 계획] 등 체계적인 상담 일지 형태로 요약해 주세요. 전문적이고 간결한 어조를 사용하세요.";
+
+  switch (consultationType) {
+    case "psychological":
+      systemPrompt = "당신은 경험이 풍부한 전문 심리 상담가입니다. 제공된 대화에서 내담자의 발화 내용을 깊이 있게 분석하여 다음 형태로 심리학적 상담 일지를 작성하세요: [내담자 주요 호소 문제], [감정선 및 심리적 상태 변화], [관찰된 행동/언어적 특이점], [상담자 개입 및 내담자 반응], [향후 상담 방향 및 제언]. 전문가적인 공감과 분석의 어조를 유지하세요.";
+      break;
+    case "family":
+      systemPrompt = "당신은 전문 가족 치료사입니다. 다중 화자 간의 대화 기록을 분석하여 개인의 심리보다는 '관계의 역동(Dynamics)'에 초점을 맞춰 일지를 작성하세요: [면담 요지 및 갈등 상황], [구성원 간 상호작용 및 의사소통 패턴], [갈등 유발 요인], [개입 및 조율 내용], [관계 개선을 위한 과제]. 중립적이고 객관적인 태도를 유지하세요.";
+      break;
+    case "career":
+      systemPrompt = "당신은 전문 코치(Coach)입니다. 제공된 내용을 GROW 모델(Goal, Reality, Options, Will)에 기반하여 분석하고 요약하세요: [내담자의 현재 목표], [현재 상황 및 장애물 진단], [논의된 가능성과 대안 발굴], [구체적인 실행 계획 및 결심]. 내담자가 실행할 수 있도록 행동 지향적인 언어로 요약하세요.";
+      break;
+    case "general":
+    default:
+      systemPrompt = "당신은 숙련된 고객 지원 및 상담 담당자입니다. 제공된 대화 기록을 기반으로 다음 항목으로 깔끔하게 요약하세요: [주요 문의 및 요구사항], [제공된 안내 및 해결책], [미해결 된 이슈], [향후 팔로업(Follow-up) 액션 아이템]. 지나치게 감정적인 분석을 배제하고 사실과 조치 내용 위주로 작성하세요.";
+      break;
+  }
+
   const requestBody = {
-    model: "gpt-4o-mini", // user wrote gpt-5.4-mini, gracefully handling as gpt-4o-mini (the cheapest valid one)
+    model: "gpt-4o-mini", // updating to standard valid model
     messages: [
-      { role: "system", content: "당신은 전문 상담가입니다. 제공된 음성 기록 텍스트를 분석하여, [상담 일자/시간], [내담자 주요 호소 문제], [상담 주요 내용], [상담자 의견 및 향후 계획] 등 체계적인 상담 일지 형태로 요약해 주세요. 전문적이고 간결한 어조를 사용하세요." },
+      { role: "system", content: systemPrompt },
       { role: "user", content: transcriptText }
     ],
     temperature: 0.3

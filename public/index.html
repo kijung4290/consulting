@@ -9,9 +9,10 @@
   </head>
   <body>
     <main class="shell">
-      <header class="header">
+      <header class="header" style="position: relative;">
         <h1>AI 상담 일지 생성기</h1>
         <p class="subtitle">음성 파일을 업로드하면 텍스트 변환과 함께 요약된 상담 일지를 자동으로 생성합니다.</p>
+        <button id="logoutBtn" class="btn-secondary" style="position: absolute; right: 0; top: 0; font-size: 0.8rem; padding: 6px 12px;">로그아웃</button>
       </header>
 
       <section class="composer">
@@ -31,6 +32,40 @@
                 <span>
                   <strong>다중 화자 (화자 분리)</strong>
                   <small>AssemblyAI 활용 (참여자 구분 병합)</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="mode-picker">
+            <legend>상담 유형 선택 (요약 프롬프트 맞춤 설정)</legend>
+            <div class="mode-options">
+              <label class="mode-option">
+                <input type="radio" name="consultationType" value="general" checked />
+                <span>
+                  <strong>일반 상담</strong>
+                  <small>고객지원/사실관계 파악</small>
+                </span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="consultationType" value="psychological" />
+                <span>
+                  <strong>심리 상담</strong>
+                  <small>감정상태 및 심리평가</small>
+                </span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="consultationType" value="family" />
+                <span>
+                  <strong>가족/부부 상담</strong>
+                  <small>관계 역동 및 상호작용</small>
+                </span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="consultationType" value="career" />
+                <span>
+                  <strong>진로/코칭 상담</strong>
+                  <small>목표 설정 및 실행 계획</small>
                 </span>
               </label>
             </div>
