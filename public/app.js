@@ -28,31 +28,20 @@ let audioChunks = [];
 let recordedBlob = null;
 let recordingTimer;
 let secondsRecorded = 0;
-let supabase;
 
 document.addEventListener("DOMContentLoaded", async () => {
   const configRes = await fetch("/api/config");
   const config = await configRes.json();
   
-  if (config.supabaseUrl && config.supabaseAnonKey) {
-    supabase = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
-    const { data: { session }, error } = await supabase.auth.getSession();
-    
-    if (error || !session) {
-      window.location.href = "/login.html";
-      return;
-    }
-  } else if (!config.supabaseUrl) {
-    // No Supabase URL configured, proceed normally
+  if (config.supabaseUrl && !localStorage.getItem("sb-access-token")) {
+    window.location.href = "/login.html";
   }
 });
 
 const logoutBtn = document.getElementById("logoutBtn");
 if (logoutBtn) {
-  logoutBtn.addEventListener("click", async () => {
-    if (supabase) {
-      await supabase.auth.signOut();
-    }
+  logoutBtn.addEventListener("click", () => {
+    localStorage.removeItem("sb-access-token");
     window.location.href = "/login.html";
   });
 }
@@ -109,14 +98,9 @@ form.addEventListener("submit", async (event) => {
   }
 
   const headers = {};
-  if (supabase) {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session) {
-      headers["Authorization"] = `Bearer ${session.access_token}`;
-    } else {
-      window.location.href = "/login.html";
-      return;
-    }
+  const token = localStorage.getItem("sb-access-token");
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   try {
