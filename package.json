@@ -1,0 +1,17 @@
+{
+  "name": "consultation-summary-app",
+  "version": "1.0.0",
+  "description": "Hybrid web app that uses OpenAI for plain transcription and AssemblyAI for speaker diarization.",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "axios": "^1.14.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "fs-extra": "^11.3.4",
+    "multer": "^2.1.1"
+  }
+}

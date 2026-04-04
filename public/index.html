@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 상담 일지 생성기</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Pretendard:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <h1>AI 상담 일지 생성기</h1>
+        <p class="subtitle">음성 파일을 업로드하면 텍스트 변환과 함께 요약된 상담 일지를 자동으로 생성합니다.</p>
+      </header>
+
+      <section class="composer">
+        <form id="transcribeForm" class="card">
+          <fieldset class="mode-picker">
+            <legend>상담 유형 선택</legend>
+            <div class="mode-options">
+              <label class="mode-option">
+                <input type="radio" name="mode" value="plain" checked />
+                <span>
+                  <strong>단일 화자 (일반)</strong>
+                  <small>OpenAI 활용 (가성비 우선)</small>
+                </span>
+              </label>
+              <label class="mode-option">
+                <input type="radio" name="mode" value="diarize" />
+                <span>
+                  <strong>다중 화자 (화자 분리)</strong>
+                  <small>AssemblyAI 활용 (참여자 구분 병합)</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <label id="speakerCountField" class="field hidden">
+            <span>참여 인원 수 (선택 사항)</span>
+            <input
+              id="expectedSpeakers"
+              name="expectedSpeakers"
+              type="number"
+              min="2"
+              step="1"
+              placeholder="예: 2 (상담자 1명, 내담자 1명)"
+            />
+            <small>참여 인원 수를 입력하면 화자 분리 정확도가 크게 향상됩니다.</small>
+          </label>
+
+          <div class="field">
+            <span>상담 오디오 입력 방식 (업로드 또는 직접 녹음)</span>
+            
+            <div class="input-methods">
+              <div class="file-upload-wrapper">
+                <input
+                  id="mediaFile"
+                  name="mediaFile"
+                  type="file"
+                  accept=".mp3,.mp4,.mpeg,.mpga,.m4a,.wav,.webm,audio/*,video/*"
+                />
+                <small>파일 업로드 지원: mp3, mp4, wav, m4a 등 (최대 25MB)</small>
+              </div>
+
+              <div class="record-divider">또는</div>
+              
+              <div class="record-section">
+                <button type="button" id="recordButton" class="btn-secondary record-btn">🎤 실시간 녹음 시작</button>
+                <button type="button" id="stopRecordButton" class="btn-secondary stop-btn hidden">🛑 녹음 중지</button>
+                
+                <span id="recordingIndicator" class="recording-indicator hidden">
+                  <span class="pulse-red"></span> 녹음 진행 중... (<span id="recordTime">00:00</span>)
+                </span>
+                
+                <div class="playback-section">
+                  <audio id="audioPlayback" controls class="hidden"></audio>
+                  <button type="button" id="clearRecordButton" class="btn-secondary clear-btn hidden">다시 녹음 (초기화)</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button id="submitButton" type="submit" class="btn-primary">
+            <span class="btn-text">음성 분석 및 일지 생성 시작</span>
+            <span class="btn-loader hidden"></span>
+          </button>
+          
+          <div id="status" class="status idle hidden">
+            업로드를 대기 중입니다.
+          </div>
+        </form>
+      </section>
+
+      <section id="resultSection" class="results-container hidden">
+        <div class="card result-card">
+          <div class="result-head">
+            <h2>📝 AI 상담 일지</h2>
+            <button id="copySummaryButton" type="button" class="btn-secondary">일지 복사</button>
+          </div>
+          <div class="content-box">
+            <textarea id="summaryText" rows="12" readonly placeholder="상담 일지가 이곳에 생성됩니다..."></textarea>
+          </div>
+        </div>
+
+        <div class="card result-card">
+          <div class="result-head">
+            <h2>🎙️ 전체 음성 기록</h2>
+            <button id="copyTranscriptButton" type="button" class="btn-secondary">기록 복사</button>
+          </div>
+          <div class="content-box">
+            <textarea id="transcriptText" rows="10" readonly placeholder="전체 음성 기록이 이곳에 생성됩니다..."></textarea>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

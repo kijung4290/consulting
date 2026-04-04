@@ -1,0 +1,79 @@
+﻿git : remote: error: GH013:
+ Repository rule violations
+ found for refs/heads/main.
+        
+위치 줄:1 문자:1
++ git push -u origin main 2
+> error_log.txt
++ ~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
+    + CategoryInfo         
+     : NotSpecified: (rem  
+  ote: error: ...s/main.   
+         :String) [], R    
+emoteException
+    + FullyQualifiedErrorI 
+   d : NativeCommandError
+ 
+remote: 
+remote: - GITHUB PUSH PROTE
+CTION        
+remote:   ?붴붴붴붴붴붴붴붴
+붴붴붴붴붴붴붴붴붴붴붴붴붴붴
+붴붴붴붴붴붴붴붴붴붴붴붴붴
+붴붴붴붴붴?       
+remote:     Resolve the fol
+lowing violations before pu
+shing again        
+remote: 
+remote:     - Push cannot c
+ontain secrets        
+remote: 
+remote:             
+remote:      (?) Learn how 
+to resolve a blocked push  
+      
+remote:      https://docs.g
+ithub.com/code-security/sec
+ret-scanning/working-with-s
+ecret-scanning-and-push-pro
+tection/working-with-push-p
+rotection-from-the-command-
+line#resolving-a-blocked-pu
+sh        
+remote:             
+remote:             
+remote:       ?붴?OpenAI AP
+I Key ?붴붴붴붴붴붴붴붴붴붴
+붴붴붴붴붴붴붴붴붴붴붴붴붴붴
+붴붴붴붴붴붴붴붴붴붴붴?   
+    
+remote:        locations:  
+      
+remote:          - commit: 
+d9a971bdc2ae23b44a84dd7eb6b
+9bc405647020b        
+remote:            path: .e
+nv.example:1        
+remote:             
+remote:        (?) To push,
+ remove secret from commit(
+s) or follow this URL to al
+low the secret.        
+remote:        https://gith
+ub.com/kijung4290/consultin
+g/security/secret-scanning/
+unblock-secret/3BsSRW1GuDKX
+okYbqcGrM5REQg9        
+remote:             
+remote: 
+remote: 
+To https://github.com/kijun
+g4290/consulting.git
+ ! [remote rejected] main -
+> main (push declined due t
+o repository rule violation
+s)
+error: failed to push some 
+refs to 'https://github.com
+/kijung4290/consulting.git'
