@@ -542,8 +542,9 @@ class ClientDetailDialog(QDialog):
             fpath = doc.get("full_path", "")
             if os.path.exists(fpath):
                 if fpath.lower().endswith(".txt"):
-                    dlg = TextViewerDialog(doc.get("title", ""), fpath, parent=self)
+                    dlg = TextViewerDialog(doc.get("title", ""), fpath, parent=self, db=self.db, doc_id=doc['id'])
                     dlg.exec()
+                    self.load_documents()
                 else:
                     open_system_file(fpath)
             else:
@@ -950,8 +951,9 @@ class ManualCounselingDialog(QDialog):
 
 class TextViewerDialog(QDialog):
     """직접 작성한 서류/메모 전문 뷰어 및 수정 다이얼로그"""
-    def __init__(self, title: str, file_path: str, parent=None):
+    def __init__(self, title: str, file_path: str, parent=None, db=None, doc_id=None):
         super().__init__(parent)
+        self.db, self.doc_id = db, doc_id
         self.title = title
         self.file_path = file_path
         self.setWindowTitle(f"📄 서류 열람 - {title}")
@@ -1022,8 +1024,18 @@ class TextViewerDialog(QDialog):
 
     def save_changes(self):
         try:
-            with open(self.file_path, "w", encoding="utf-8") as f:
-                f.write(self.editor.toPlainText())
+            if self.db is not None and self.doc_id is not None:
+                with self.db.get_connection() as conn:
+                    row = conn.execute('SELECT * FROM documents WHERE id=?', (self.doc_id,)).fetchone()
+                if not row:
+                    raise ValueError('이미 삭제된 서류입니다.')
+                self.db.update_attachment(self.doc_id, row['title'], row['doc_type'], row['notes'], text=self.editor.toPlainText())
+                with self.db.get_connection() as conn:
+                    updated = conn.execute('SELECT file_name FROM documents WHERE id=?', (self.doc_id,)).fetchone()
+                self.file_path = self.db.get_document_full_path(updated['file_name'])
+            else:
+                with open(self.file_path, "w", encoding="utf-8") as f:
+                    f.write(self.editor.toPlainText())
             QMessageBox.information(self, "저장 완료", "서류 내용이 성공적으로 수정 저장되었습니다.")
         except Exception as e:
             QMessageBox.critical(self, "저장 오류", f"수정 저장 중 오류가 발생했습니다:\n{str(e)}")

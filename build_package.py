@@ -18,7 +18,7 @@ def source_files():
             yield path
     for folder in ('docs', 'tests'):
         for path in sorted((ROOT / folder).rglob('*')):
-            if path.is_file() and path.suffix in ('.py', '.md') and '__pycache__' not in path.parts:
+            if path.is_file() and path.suffix in ('.py', '.md', '.txt') and '__pycache__' not in path.parts:
                 yield path
 
 def main():

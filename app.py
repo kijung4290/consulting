@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
     QLabel, QTextEdit, QComboBox, QPushButton, QCheckBox, QLineEdit,
     QProgressBar, QSplitter, QGroupBox, QFileDialog, QMessageBox,
     QStatusBar, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFrame, QScrollArea, QInputDialog, QDateEdit
+    QHeaderView, QFrame, QScrollArea, QInputDialog, QDateEdit, QDialog
 )
 from PyQt6.QtCore import Qt, QEvent, QMimeData, QDate
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
@@ -44,6 +44,7 @@ from setup_dialog import StorageSetupDialog
 from anonymizer import Anonymizer
 from prompts import TEMPLATES, build_prompt
 from engine import InferenceEngine
+from client_context import ContextController
 from download_model import get_model_path, is_model_downloaded
 from ui_theme import APP_STYLESHEET, make_action_card, make_page_header, set_button_role
 from workers import DownloadWorker, GenerationWorker, ModelLoadWorker
@@ -90,6 +91,16 @@ class MainWindow(QMainWindow):
         self.apply_styling()
         self.check_and_load_model()
         self.refresh_all_data()
+
+        self.context_controller = ContextController(self)
+
+    def closeEvent(self, event):
+        self.context_controller.stop()
+        for worker in (self.worker, self.model_load_worker):
+            if worker and worker.isRunning():
+                self.engine.abort()
+                worker.wait()
+        super().closeEvent(event)
 
     def init_ui(self):
         central_widget = QWidget()
@@ -354,7 +365,7 @@ class MainWindow(QMainWindow):
         self.kpi_clients = self.create_kpi_card("총 관리 대상자", "0명", "#176B5B", "#E3F0EC", "등록된 전체 사례 대상자", lambda: self.switch_page(1))
         self.kpi_high_risk = self.create_kpi_card("고위기 집중관리", "0명", "#B83A4B", "#FCEBED", "집중 모니터링 필요 대상", self.nav_to_high_risk_clients)
         self.kpi_monthly = self.create_kpi_card("이달의 상담 실적", "0건", "#237A64", "#E7F3EF", "이번 달 누적 상담 기록", lambda: self.switch_page(3))
-        self.kpi_docs = self.create_kpi_card("등록 증빙 서류", "0건", "#A76318", "#FFF1DC", "증빙 및 관련 첨부 서류", lambda: self.switch_page(4))
+        self.kpi_docs = self.create_kpi_card("등록 서류", "0건", "#A76318", "#FFF1DC", "작성 서류·상담일지·첨부 파일", lambda: self.switch_page(4))
 
         kpi_layout.addWidget(self.kpi_clients)
         kpi_layout.addWidget(self.kpi_high_risk)
@@ -417,6 +428,17 @@ class MainWindow(QMainWindow):
         rg_layout.addWidget(self.dash_table)
 
         layout.addWidget(recent_group, stretch=1)
+        documents_group = QGroupBox('최근 등록·수정 서류 (더블 클릭으로 열기)')
+        documents_layout = QVBoxLayout(documents_group)
+        self.dash_documents_table = QTableWidget(0, 4)
+        self.dash_documents_table.setHorizontalHeaderLabels(['대상자', '서류명', '구분', '등록·수정일'])
+        self.dash_documents_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dash_documents_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.dash_documents_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.dash_documents_table.cellDoubleClicked.connect(
+            lambda row, _col: self.open_registry_document(self.dash_documents_table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
+        documents_layout.addWidget(self.dash_documents_table)
+        layout.addWidget(documents_group, stretch=1)
         return page
 
     def create_kpi_card(self, title: str, value: str, color_hex: str, bg_tint: str, subtext: str, click_handler=None) -> QWidget:
@@ -543,6 +565,13 @@ class MainWindow(QMainWindow):
 
     def refresh_dashboard(self):
         stats = self.db.get_dashboard_stats()
+        recent_documents = self.db.list_document_registry()[:5]
+        self.dash_documents_table.setRowCount(len(recent_documents))
+        for row, document in enumerate(recent_documents):
+            for column, value in enumerate((document['client_name'] or '미지정', document['title'], document['doc_type'], document['created_at'])):
+                item = QTableWidgetItem(str(value or ''))
+                item.setData(Qt.ItemDataRole.UserRole, document)
+                self.dash_documents_table.setItem(row, column, item)
         self.kpi_clients.findChild(QLabel, "kpiValue").setText(f"{stats['total_clients']}명")
         self.kpi_high_risk.findChild(QLabel, "kpiValue").setText(f"{stats['high_risk_clients']}명")
         self.kpi_monthly.findChild(QLabel, "kpiValue").setText(f"{stats['monthly_counselings']}건")
@@ -1112,6 +1141,8 @@ class MainWindow(QMainWindow):
 
         btn_open_doc = QPushButton("🔍 선택 서류 열기 (HWP/PDF/TXT)")
         btn_open_doc.clicked.connect(self.open_selected_document)
+        btn_edit_doc = QPushButton('선택 서류 수정')
+        btn_edit_doc.clicked.connect(self.edit_selected_document)
 
         btn_del_doc = QPushButton("🗑️ 서류 삭제")
         set_button_role(btn_del_doc, "danger")
@@ -1124,6 +1155,7 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(btn_add_doc)
         top_layout.addWidget(btn_type_doc)
         top_layout.addWidget(btn_open_doc)
+        top_layout.addWidget(btn_edit_doc)
         top_layout.addWidget(btn_del_doc)
         top_layout.addWidget(btn_backup_docs)
         layout.addLayout(top_layout)
@@ -1149,6 +1181,8 @@ class MainWindow(QMainWindow):
         self.doc_filter_type.setMinimumWidth(160)
         self.doc_filter_type.addItems([
             "전체 구분",
+            "사례관리 서류",
+            "상담일지",
             "초기면접지/인테이크",
             "전화상담/민원메모",
             "가정방문 현장기록",
@@ -1197,7 +1231,7 @@ class MainWindow(QMainWindow):
         # 서류 목록 테이블
         self.docs_table = QTableWidget()
         self.docs_table.setColumnCount(6)
-        self.docs_table.setHorizontalHeaderLabels(["ID", "서류 제목", "구분", "대상자(가명)", "등록일시", "파일크기"])
+        self.docs_table.setHorizontalHeaderLabels(["ID", "서류 제목", "구분", "대상자(가명)", "등록·수정일시", "크기/상태"])
         self.docs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.docs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.docs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -1245,13 +1279,14 @@ class MainWindow(QMainWindow):
             doc_type = "전체"
         keyword = self.doc_search_input.text().strip()
 
-        docs = self.db.list_documents(client_id=client_id, doc_type=doc_type, keyword=keyword)
+        docs = self.db.list_document_registry(client_id=client_id, doc_type=doc_type, keyword=keyword)
         self.docs_table.setSortingEnabled(False)
         self.docs_table.setRowCount(len(docs))
         self.docs_table.verticalHeader().setDefaultSectionSize(40)
         for idx, d in enumerate(docs):
             id_item = QTableWidgetItem()
             id_item.setData(Qt.ItemDataRole.DisplayRole, d['id'])
+            id_item.setData(Qt.ItemDataRole.UserRole, d)
             id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.docs_table.setItem(idx, 0, id_item)
 
@@ -1268,7 +1303,7 @@ class MainWindow(QMainWindow):
             self.docs_table.setItem(idx, 3, QTableWidgetItem(cname))
             self.docs_table.setItem(idx, 4, QTableWidgetItem(d.get('created_at', '')[:16]))
             kb = round(d.get('file_size', 0) / 1024, 1)
-            self.docs_table.setItem(idx, 5, QTableWidgetItem(f"{kb} KB"))
+            self.docs_table.setItem(idx, 5, QTableWidgetItem(f"{kb} KB" if d['source_type'] == 'attachment' else d['status']))
         self.docs_table.setSortingEnabled(True)
 
     def open_new_document_dialog(self):
@@ -1325,6 +1360,12 @@ class MainWindow(QMainWindow):
         return None
 
     def open_selected_document(self):
+        row = self.docs_table.currentRow()
+        if row >= 0:
+            document = self.docs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if document and document['source_type'] != 'attachment':
+                self.open_registry_document(document)
+                return
         did = self.get_selected_doc_id()
         if not did:
             QMessageBox.information(self, "알림", "열람할 서류를 먼저 선택해 주세요.")
@@ -1339,23 +1380,87 @@ class MainWindow(QMainWindow):
                 full_p = self.db.get_document_full_path(row['file_name'])
                 if os.path.exists(full_p):
                     if full_p.lower().endswith(".txt"):
-                        dlg = TextViewerDialog(row['title'], full_p, parent=self)
+                        dlg = TextViewerDialog(row['title'], full_p, parent=self, db=self.db, doc_id=did)
                         dlg.exec()
+                        self.refresh_documents_table()
+                        self.refresh_dashboard()
                     else:
                         open_system_file(full_p)
                     return
         QMessageBox.warning(self, "오류", "서류 원본 파일을 찾을 수 없습니다.")
 
-    def delete_selected_document(self):
-        did = self.get_selected_doc_id()
-        if not did:
-            QMessageBox.information(self, "알림", "삭제할 서류를 먼저 선택해 주세요.")
+    def open_registry_document(self, document):
+        if document['source_type'] == 'case_form':
+            from case_forms import CaseFormDialog
+            record = next((r for r in self.db.list_case_forms(document['client_id']) if r['id'] == document['id']), None)
+            if record:
+                dialog = CaseFormDialog(self.db, document['client_id'], self.current_profile['id'], record['stage'], {}, record, self)
+                dialog.exec()
+                self.refresh_documents_table()
+                self.refresh_dashboard()
+        elif document['source_type'] == 'counseling':
+            with self.db.get_connection() as conn:
+                record = conn.execute('SELECT * FROM counseling_records WHERE id=?', (document['id'],)).fetchone()
+            if record:
+                dialog = QDialog(self)
+                dialog.setWindowTitle(document['title'])
+                dialog.resize(900, 700)
+                layout = QVBoxLayout(dialog)
+                text = QTextEdit()
+                text.setReadOnly(True)
+                if record['result_html']:
+                    text.setHtml(record['result_html'])
+                else:
+                    text.setPlainText(record['ai_result'])
+                layout.addWidget(text)
+                dialog.exec()
+        else:
+            with self.db.get_connection() as conn:
+                record = conn.execute('SELECT title, file_name FROM documents WHERE id=?', (document['id'],)).fetchone()
+            if record:
+                path = self.db.get_document_full_path(record['file_name'])
+                if os.path.isfile(path):
+                    if path.lower().endswith('.txt'):
+                        TextViewerDialog(record['title'], path, parent=self, db=self.db, doc_id=document['id']).exec()
+                        self.refresh_documents_table()
+                        self.refresh_dashboard()
+                    else:
+                        open_system_file(path)
+                else:
+                    QMessageBox.warning(self, '파일 확인', '서류 원본 파일을 찾을 수 없습니다.')
+
+    def edit_selected_document(self):
+        row = self.docs_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, '서류 선택', '수정할 서류를 선택해 주세요.')
             return
-        reply = QMessageBox.question(self, "서류 삭제", "정말 이 서류를 삭제하시겠습니까?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.db.delete_document(did)
+        document = self.docs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        try:
+            if document['source_type'] == 'case_form':
+                self.open_registry_document(document)
+            else:
+                from document_editor import DocumentEditDialog
+                DocumentEditDialog(self.db, document, self.current_profile['id'], self).exec()
             self.refresh_documents_table()
             self.refresh_dashboard()
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, '수정 실패', str(exc))
+
+    def delete_selected_document(self):
+        row = self.docs_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "알림", "삭제할 서류를 먼저 선택해 주세요.")
+            return
+        document = self.docs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        reply = QMessageBox.question(self, "서류 삭제", f"'{document['title']}' ({document['doc_type']})을 삭제할까요?\n원본 기록이 삭제되며 업무현황과 AI 맥락에도 반영됩니다. 복구하려면 기존 백업이 필요합니다.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                self.db.delete_registered_document(document['source_type'], document['id'], self.current_profile['id'])
+                self.refresh_documents_table()
+                self.refresh_dashboard()
+                self.status_bar.showMessage('서류를 삭제했습니다. AI 맥락은 자동으로 다시 갱신됩니다.', 5000)
+            except (ValueError, OSError) as exc:
+                QMessageBox.warning(self, '삭제 실패', str(exc))
 
     # ================= [PAGE 4: 설정 및 백업] =================
     def create_settings_page(self) -> QWidget:
@@ -1535,7 +1640,9 @@ class MainWindow(QMainWindow):
         dlg = StorageSetupDialog(self, is_change_mode=True)
         if dlg.exec():
             new_dir = config.get_data_dir()
+            self.context_controller.stop()
             self.db = Database(data_dir=new_dir)
+            self.context_controller.timer.start()
             self.db_dir_label.setText(self.db.data_dir)
             self.refresh_all_data()
             QMessageBox.information(self, "완료", f"데이터 저장 위치가 성공적으로 변경되었습니다:\n{new_dir}")
@@ -1610,7 +1717,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
+                self.context_controller.stop()
                 ok, msg, meta = Database.restore_from_backup_zip(import_path, self.db.data_dir)
+                self.context_controller.timer.start()
                 if ok:
                     self.db = Database(data_dir=self.db.data_dir)
                     self.refresh_all_data()
@@ -1657,6 +1766,7 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 import shutil
+                self.context_controller.stop()
                 try:
                     shutil.copy2(import_path, self.db.db_path)
                     self.db = Database(data_dir=self.db.data_dir)
@@ -1664,6 +1774,8 @@ class MainWindow(QMainWindow):
                     QMessageBox.information(self, "복원 완료", "데이터베이스 파일이 성공적으로 복원되었습니다!")
                 except Exception as e:
                     QMessageBox.critical(self, "복원 실패", f"DB 복원 중 오류 발생:\n{str(e)}")
+                finally:
+                    self.context_controller.timer.start()
 
     def refresh_all_data(self):
         # 저장 위치 변경·백업 복원 뒤에도 각 화면이 새 DB와 현재 사용자 정보를 바라보게 합니다.
@@ -1748,6 +1860,9 @@ class MainWindow(QMainWindow):
             self.generate_btn.setEnabled(False)
 
     def start_generation(self):
+        if self.context_controller.busy():
+            self.status_bar.showMessage("대상자 맥락을 갱신 중입니다. 완료 후 상담일지를 생성해 주세요.", 5000)
+            return
         raw_text = self.input_text.toPlainText().strip()
         if not raw_text:
             QMessageBox.warning(self, "입력 확인", "상담 메모를 먼저 입력해 주세요.")

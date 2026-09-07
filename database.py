@@ -12,6 +12,7 @@ import sqlite3
 import shutil
 import tempfile
 import zipfile
+import uuid
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
@@ -246,6 +247,8 @@ class Database:
             self._ensure_column(conn, "counseling_records", "template_snapshot", "TEXT DEFAULT ''")
             self._ensure_column(conn, "counseling_records", "owner_id", "INTEGER")
             self._ensure_column(conn, "counseling_records", "result_html", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "counseling_records", "updated_at", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "documents", "updated_at", "TEXT DEFAULT ''")
             self._ensure_column(conn, "form_templates", "form_html", "TEXT DEFAULT ''")
             self._ensure_column(conn, "worker_profiles", "approval_line_json", "TEXT DEFAULT ''")
 
@@ -280,6 +283,8 @@ class Database:
                 WHERE source_key IS NOT NULL
             """)
 
+            from client_context import initialize_context
+            initialize_context(conn)
             conn.commit()
 
     @staticmethod
@@ -1044,18 +1049,117 @@ class Database:
                 results.append(item)
             return results
 
+    def list_document_registry(self, client_id=None, doc_type='전체', keyword=''):
+        """첨부 파일과 작성 서류를 원본 복제 없이 함께 조회한다."""
+        with self.get_connection() as conn:
+            rows = conn.execute("""
+                SELECT d.id, d.client_id, d.title, d.doc_type, d.notes, COALESCE(NULLIF(d.updated_at, ''), d.created_at) AS created_at,
+                       d.file_size, 'attachment' AS source_type, '' AS status
+                FROM documents d
+                UNION ALL
+                SELECT id, client_id, source_key, '사례관리 서류', stage, updated_at,
+                       0, 'case_form', status FROM case_form_records
+                UNION ALL
+                SELECT id, client_id, template_name, '상담일지', raw_memo, COALESCE(NULLIF(updated_at, ''), created_at),
+                       0, 'counseling', '저장완료' FROM counseling_records
+                ORDER BY created_at DESC, id DESC
+            """).fetchall()
+            clients = {row['id']: dict(row) for row in conn.execute('SELECT id, name, masked_name FROM clients')}
+        result = []
+        for row in rows:
+            item = dict(row)
+            client = clients.get(item['client_id'], {})
+            item.update(client_name=client.get('name', ''), masked_name=client.get('masked_name', ''))
+            if client_id == -1 and item['client_id']:
+                continue
+            if client_id not in (None, -1) and item['client_id'] != client_id:
+                continue
+            if doc_type and '전체' not in doc_type and not doc_type.startswith('[') and doc_type not in (item['doc_type'], item['title']):
+                continue
+            if keyword and keyword.casefold() not in ' '.join(str(item.get(k) or '') for k in ('title', 'notes', 'client_name', 'masked_name')).casefold():
+                continue
+            result.append(item)
+        return result
+
+    def update_attachment(self, doc_id, title, doc_type, notes='', text=None, replacement=None):
+        if not title.strip():
+            raise ValueError('서류 제목을 입력해 주세요.')
+        if text is not None and replacement:
+            raise ValueError('본문 수정과 파일 교체는 한 번에 하나만 선택하세요.')
+        new_path = None
+        try:
+            with self.get_connection() as conn:
+                row = conn.execute('SELECT * FROM documents WHERE id=?', (doc_id,)).fetchone()
+                if not row:
+                    raise ValueError('삭제되었거나 존재하지 않는 서류입니다.')
+                filename = row['file_name']
+                size = row['file_size']
+                if text is not None or replacement:
+                    suffix = os.path.splitext(replacement or filename)[1]
+                    if text is not None and suffix.lower() != '.txt':
+                        raise ValueError('본문 수정은 TXT 파일만 지원합니다.')
+                    filename = f'doc_{uuid.uuid4().hex}{suffix}'
+                    new_path = self.get_document_full_path(filename)
+                    if replacement:
+                        shutil.copy2(replacement, new_path)
+                    else:
+                        with open(new_path, 'w', encoding='utf-8') as stream:
+                            stream.write(text)
+                    size = os.path.getsize(new_path)
+                conn.execute('UPDATE documents SET title=?, doc_type=?, notes=?, file_name=?, file_size=?, updated_at=CURRENT_TIMESTAMP WHERE id=?',
+                             (title.strip(), doc_type, notes, filename, size, doc_id))
+        except Exception:
+            if new_path and os.path.isfile(new_path):
+                os.remove(new_path)
+            raise
+        if new_path:
+            old_path = os.path.realpath(self.get_document_full_path(row['file_name']))
+            with self.get_connection() as conn:
+                referenced = conn.execute('SELECT 1 FROM documents WHERE file_name=?', (row['file_name'],)).fetchone()
+            if not referenced and os.path.commonpath([old_path, os.path.realpath(self.docs_dir)]) == os.path.realpath(self.docs_dir):
+                try:
+                    if os.path.isfile(old_path):
+                        os.remove(old_path)
+                except OSError:
+                    pass  # 열려 있는 이전 파일은 남기되 저장된 새 본문은 유지한다.
+
+    def update_counseling_content(self, record_id, owner_id, title, session_date, worker_name, content, html):
+        if not title.strip() or not content.strip():
+            raise ValueError('제목과 상담 내용을 입력해 주세요.')
+        datetime.strptime(session_date, '%Y-%m-%d')
+        with self.get_connection() as conn:
+            cursor = conn.execute("""UPDATE counseling_records SET template_name=?, session_date=?,
+                worker_name=?, ai_result=?, result_html=?, raw_memo=?, detail_level='직접수기작성', updated_at=CURRENT_TIMESTAMP
+                WHERE id=? AND (owner_id=? OR owner_id IS NULL)""",
+                (title.strip(), session_date, worker_name, content, html, content, record_id, owner_id))
+            if cursor.rowcount != 1:
+                raise ValueError('본인이 작성한 상담일지만 수정할 수 있습니다. 이전 버전의 작성자 미지정 기록은 수정 가능합니다.')
+
+    def delete_registered_document(self, source_type, record_id, owner_id):
+        if source_type == 'attachment':
+            return self.delete_document(record_id)
+        if source_type not in ('case_form', 'counseling'):
+            raise ValueError('알 수 없는 서류 종류입니다.')
+        table = 'case_form_records' if source_type == 'case_form' else 'counseling_records'
+        permission = 'owner_id=?' if source_type == 'case_form' else '(owner_id=? OR owner_id IS NULL)'
+        with self.get_connection() as conn:
+            cursor = conn.execute(f'DELETE FROM {table} WHERE id=? AND {permission}', (record_id, owner_id))
+            if cursor.rowcount != 1:
+                raise ValueError('본인이 작성한 서류만 삭제할 수 있거나 이미 삭제된 기록입니다.')
+        return True
+
     def delete_document(self, doc_id: int) -> bool:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT file_name FROM documents WHERE id = ?", (doc_id,))
             row = cursor.fetchone()
             if row:
-                full_p = self.get_document_full_path(row["file_name"])
-                if os.path.exists(full_p):
-                    try:
-                        os.remove(full_p)
-                    except Exception:
-                        pass
+                full_p = os.path.realpath(self.get_document_full_path(row["file_name"]))
+                other = conn.execute('SELECT 1 FROM documents WHERE file_name=? AND id<>?', (row['file_name'], doc_id)).fetchone()
+                if not other and os.path.isfile(full_p):
+                    if os.path.commonpath([full_p, os.path.realpath(self.docs_dir)]) != os.path.realpath(self.docs_dir):
+                        raise ValueError('서류 저장 폴더 밖의 파일은 삭제할 수 없습니다.')
+                    os.remove(full_p)
 
             cursor.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             conn.commit()
@@ -1080,6 +1184,8 @@ class Database:
 
             cursor.execute("SELECT COUNT(*) FROM documents")
             total_docs = cursor.fetchone()[0]
+            cursor.execute('SELECT (SELECT COUNT(*) FROM case_form_records) + (SELECT COUNT(*) FROM counseling_records)')
+            total_docs += cursor.fetchone()[0]
 
             today = datetime.now().strftime("%Y-%m-%d")
             next_week = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")

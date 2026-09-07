@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QScrollArea,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -199,7 +200,7 @@ class TemplateManagerPage(QWidget):
         splitter.setHandleWidth(8)
 
         left = QWidget()
-        left.setMinimumWidth(230)
+        left.setMinimumWidth(190)
         left.setMaximumWidth(310)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 6, 0)
@@ -245,8 +246,11 @@ class TemplateManagerPage(QWidget):
         right_layout.addLayout(form)
 
         editor_tabs = QTabWidget()
+        self.editor_tabs = editor_tabs
+        self.fullscreen_dialog = None
 
         design_tab = QWidget()
+        self.design_tab = design_tab
         design_layout = QVBoxLayout(design_tab)
         design_layout.setContentsMargins(0, 0, 0, 0)
         design_layout.setSpacing(0)
@@ -520,7 +524,25 @@ class TemplateManagerPage(QWidget):
             "background:#FFF4E2;color:#7A541E;border-radius:6px;padding:7px;font-size:9px;"
         )
         inspector_layout.addWidget(inspector_footer)
-        designer_splitter.addWidget(inspector)
+        inspector_scroll = QScrollArea()
+        inspector_scroll.setWidgetResizable(True)
+        inspector_scroll.setMinimumWidth(230)
+        inspector_scroll.setWidget(inspector)
+        designer_splitter.addWidget(inspector_scroll)
+
+        tools_btn = QPushButton("도구 펼치기")
+        tools_btn.setCheckable(True)
+        tools_btn.toggled.connect(palette_box.setVisible)
+        tools_btn.toggled.connect(inspector_scroll.setVisible)
+        command_layout.insertWidget(0, tools_btn)
+        palette_box.hide()
+        inspector_scroll.hide()
+
+        focus_btn = QPushButton("전체화면 편집")
+        self.fullscreen_button = focus_btn
+        set_button_role(focus_btn, "primary")
+        command_layout.insertWidget(1, focus_btn)
+        focus_btn.clicked.connect(self.toggle_fullscreen_editor)
 
         designer_splitter.setStretchFactor(0, 0)
         designer_splitter.setStretchFactor(1, 1)
@@ -580,8 +602,52 @@ class TemplateManagerPage(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([270, 1000])
+        splitter.setSizes([190, 1000])
         layout.addWidget(splitter, stretch=1)
+
+    def toggle_fullscreen_editor(self):
+        """동일한 편집기를 옮겨 서식, 선택 위치와 실행 취소 이력을 유지한다."""
+        if self.fullscreen_dialog is not None:
+            self.fullscreen_dialog.reject()
+            return
+        dialog = QDialog(self)
+        self.fullscreen_dialog = dialog
+        dialog.setWindowTitle("표 양식 전체화면 편집")
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self._design_tab_index = self.editor_tabs.indexOf(self.design_tab)
+        self.editor_tabs.removeTab(self._design_tab_index)
+        layout.addWidget(self.design_tab, stretch=1)
+        self.design_tab.show()
+        footer = QHBoxLayout()
+        footer.addWidget(QLabel("Esc로 돌아가기 · 편집 내용은 유지됩니다. 저장하려면 ‘내 양식 저장’을 누르세요."))
+        footer.addStretch()
+        save = QPushButton("내 양식 저장")
+        set_button_role(save, "primary")
+        save.clicked.connect(self.save_template)
+        footer.addWidget(save)
+        done = QPushButton("편집 마치기")
+        done.clicked.connect(dialog.accept)
+        footer.addWidget(done)
+        layout.addLayout(footer)
+        self.fullscreen_button.setText("전체화면 나가기")
+        dialog.finished.connect(self.restore_design_editor)
+        dialog.showFullScreen()
+        self.form_editor.setFocus()
+
+    def restore_design_editor(self, _result=0):
+        dialog = self.fullscreen_dialog
+        if dialog is None:
+            return
+        dialog.layout().removeWidget(self.design_tab)
+        self.editor_tabs.insertTab(self._design_tab_index, self.design_tab, "표 양식 디자인")
+        self.editor_tabs.setCurrentWidget(self.design_tab)
+        self.design_tab.show()
+        self.fullscreen_button.setText("전체화면 편집")
+        self.fullscreen_dialog = None
+        dialog.deleteLater()
+        self.form_editor.setFocus()
 
     def set_profile(self, profile_id: int) -> None:
         self.profile_id = profile_id

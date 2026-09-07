@@ -2,7 +2,7 @@
 
 from typing import Optional
 
-from PyQt6.QtCore import QDate, Qt, pyqtSignal
+from PyQt6.QtCore import QDate, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 from database import Database
 from case_forms import CaseFormsPanel
 from ui_theme import make_page_header, set_button_role
+from client_context import read_context
 
 
 STAGES = ["접수", "사정", "계획", "개입", "점검", "종결", "사후관리"]
@@ -32,6 +33,9 @@ class CaseManagementPage(QWidget):
         self._client_drafts = {}
         self._build_ui()
         self.refresh_clients()
+        self.context_timer = QTimer(self)
+        self.context_timer.timeout.connect(self.refresh_context)
+        self.context_timer.start(1500)
 
     def _build_ui(self):
         self.setObjectName("pageRoot")
@@ -76,6 +80,18 @@ class CaseManagementPage(QWidget):
         root.addWidget(stage_group)
 
         self.tabs = QTabWidget()
+        context_page = QWidget()
+        context_layout = QVBoxLayout(context_page)
+        self.context_status = QLabel("등록·상담·서류 저장 후 로컬 AI가 자동으로 갱신합니다.")
+        self.context_status.setWordWrap(True)
+        context_layout.addWidget(self.context_status)
+        retry = QPushButton("맥락 다시 갱신")
+        retry.clicked.connect(self.retry_context)
+        context_layout.addWidget(retry)
+        self.context_text = QTextEdit()
+        self.context_text.setReadOnly(True)
+        context_layout.addWidget(self.context_text)
+        self.tabs.addTab(context_page, "AI 대상자 맥락")
         self.forms_panel = CaseFormsPanel(self.db)
         self.tabs.addTab(self.forms_panel, "단계별 서류·작성 이력")
         for page, title in ((self._build_assessment_tab(), "욕구·위기도 사정"),
@@ -87,6 +103,25 @@ class CaseManagementPage(QWidget):
             scroll.setWidget(page)
             self.tabs.addTab(scroll, title)
         root.addWidget(self.tabs, stretch=1)
+
+    def refresh_context(self):
+        context = read_context(self.db, self.client_id) if self.client_id else {}
+        status = "대상자를 선택해 주세요."
+        if context:
+            status = ("갱신 대기·처리 중 (로컬 AI 모델 설치 필요)" if context['revision'] != context['processed_revision']
+                      else "최신 기록 반영 완료 · " + context['updated_at'] + " UTC")
+            if context['error']:
+                status = "갱신 실패 · " + context['error'] + " · 다시 갱신을 눌러 주세요."
+        self.context_status.setText(status + "\nAI 요약은 담당자 확인이 필요합니다. 근거 번호는 각 기록의 ID입니다.")
+        text = context.get('summary', '') + "\n\n[근거 자료]\n" + context.get('sources', '')
+        if self.context_text.toPlainText() != text:
+            self.context_text.setPlainText(text)
+
+    def retry_context(self):
+        if self.client_id:
+            with self.db.get_connection() as conn:
+                conn.execute("UPDATE client_context SET revision=revision+1, error='' WHERE client_id=?", (self.client_id,))
+            self.refresh_context()
 
     @staticmethod
     def _date_edit(days_from_today: int = 0) -> QDateEdit:
@@ -331,6 +366,7 @@ class CaseManagementPage(QWidget):
                 'resource': self.resource_combo.currentData(),
             }
         self.client_id = self.client_combo.currentData()
+        self.refresh_context()
         for name in names:
             getattr(self, name).clear()
         for combo in self.assessment_inputs.values():
