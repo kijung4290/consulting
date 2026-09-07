@@ -1,3 +1,14 @@
-node_modules
-.env
-uploads
+__pycache__/
+*.py[cod]
+.venv/
+.venv_linux/
+build/
+dist/
+installer_output/
+models/*.gguf
+models/.cache/
+data/
+*.db
+*.db-wal
+*.db-shm
+config.json

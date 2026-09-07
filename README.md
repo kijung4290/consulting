@@ -1,63 +1,71 @@
-# Hybrid Transcription App
+# 사회복지 상담기록 AI · 1.1.0
 
-This app routes requests by feature:
+Windows / Linux Mint·Ubuntu에서 사용하는 PyQt6 데스크톱 프로그램입니다.
+상담 메모는 로컬 Gemma 모델로 정리하며, 직접 서류 작성은 AI 모델 없이도 사용할 수 있습니다.
 
-- Plain transcription -> OpenAI `gpt-4o-mini-transcribe`
-- Speaker diarization -> AssemblyAI with `speaker_labels=true`
+## 주요 기능
 
-## Features
+- 대상자 관리, 상담기록, 첨부 서류, 백업·복원
+- 사례관리 7단계와 14종 서류양식 연결
+- 대상자별 서류 작성·이어쓰기·임시저장·작성완료
+- 이전 서류 내용 불러오기, 작성 당시 양식 보존, PDF 출력
+- 개인 양식 편집과 사용자별 결재라인
+- 욕구사정, 목표·개입계획, 모니터링 일정, 서비스 연계
 
-- Single upload flow for audio or video files
-- Plain transcript mode for lower-cost text transcription
-- Speaker diarization mode for speaker-separated segments
-- Optional OpenAI prompt hint for plain transcripts
-- Optional expected speaker count for AssemblyAI diarization
-- Copy transcript in the browser
-- Download transcript as `.txt`
+단계별 서류의 AI 직접 작성·평가 자동 집계는 아직 지원하지 않습니다.
+SQLite와 첨부 서류는 암호화되지 않으므로 PC 및 저장 폴더의 접근 권한을 관리하세요.
 
-## Supported formats
+## 설치
 
-- `mp3`
-- `mp4`
-- `mpeg`
-- `mpga`
-- `m4a`
-- `wav`
-- `webm`
+자세한 안내: [Windows / Linux 설치·배포](docs/설치_배포.md)
 
-## Environment variables
+Windows 설치본은 WelfareAI-Setup-1.1.0.exe입니다.
+GitHub 소스로 실행할 경우 Python 3.11 이상과 C++ 빌드 환경이 필요할 수 있습니다.
 
-```env
-OPENAI_API_KEY=your_openai_api_key_here
-ASSEMBLYAI_API_KEY=your_assemblyai_api_key_here
-PORT=3000
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe app.py
 ```
 
-## Run locally
-
-1. Install dependencies
+Linux Mint / Ubuntu에서는 설치 안내의 시스템 패키지 준비 후 실행하세요.
 
 ```bash
-npm install
+bash install_linux.sh
+bash run_linux.sh
 ```
 
-2. Create `.env` from `.env.example`
+Git에는 개인 설정·상담 데이터·모델·가상환경·빌드 결과를 포함하지 않습니다.
+모델은 앱의 다운로드 기능 또는 별도 models 폴더로 준비합니다.
+업데이트 전 전체 백업을 만들고, 업데이트 후 기존 데이터 폴더를 선택하세요.
 
-3. Start the dev server
+## 배포 빌드
 
-```bash
-npm run dev
+Windows에서 PyInstaller 및 Inno Setup 6을 설치한 후:
+
+```powershell
+.\.venv\Scripts\python.exe build_package.py --platform all
 ```
 
-4. Open the app at `http://localhost:3000`
+installer_output/버전-빌드시각/에 Windows 설치본과 Linux 소스 설치 패키지를 만듭니다.
+models 폴더에 모델이 있으면 양쪽 패키지에 포함합니다. 이전 빌드는 보존합니다.
+Linux 패키지는 소스 기반이며 최초 의존성 설치에는 인터넷이 필요합니다.
 
-## Routing behavior
+## 검증
 
-- `Plain transcription` calls OpenAI `v1/audio/transcriptions`
-- `Speaker diarization` uploads to AssemblyAI, requests `speaker_labels`, and polls until completion
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
-## Notes
+Linux 실기기 검증은 별도로 필요합니다.
 
-- The app keeps a `25MB` upload limit so the OpenAI plain-transcription path stays within the current OpenAI upload constraint.
-- For larger files, split or compress the media first.
-- Plain mode in this app does not do speaker separation.
+## 코드와 사용 안내
+
+- [코드 구조](ARCHITECTURE.md)
+- [사례관리 서류 진행](docs/사례관리_서류진행.md)
+- [14종 양식 안내](docs/사례관리양식.md)
+- app.py: 메인 화면과 상담 작성
+- case_management.py / case_forms.py: 사례관리 작업판과 서류 작성
+- case_form_templates.py / template_manager.py: 양식 정의와 편집
+- database.py: 로컬 저장과 백업
+- engine.py / workers.py: 로컬 AI 실행
