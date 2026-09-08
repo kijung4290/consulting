@@ -9,7 +9,7 @@ from PyQt6.QtPrintSupport import QPrintDialog, QPrinter
 from PyQt6.QtWidgets import (
     QComboBox, QDateEdit, QDialog, QFileDialog, QGroupBox, QHBoxLayout,
     QHeaderView, QLabel, QMessageBox, QPushButton, QSplitter, QTableWidget,
-    QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget,
+    QTableWidgetItem, QTextBrowser, QVBoxLayout, QWidget, QGridLayout,
 )
 
 from database import Database
@@ -27,7 +27,7 @@ class CounselingReportDialog(QDialog):
         self.records = []
         self.document = QTextDocument(self)
         self.setWindowTitle("상담일지 조회·출력")
-        self.setMinimumSize(980, 640)
+        self.setMinimumSize(820, 540)
         self.resize(1180, 760)
         self._build_ui()
         self._load_filters()
@@ -42,11 +42,12 @@ class CounselingReportDialog(QDialog):
         title.setObjectName("reportTitle")
         description = QLabel("대상자와 상담 양식, 기간을 선택하면 저장된 상담일지를 모아서 출력할 수 있습니다.")
         description.setObjectName("sectionHint")
+        description.setWordWrap(True)
         root.addWidget(title)
         root.addWidget(description)
 
         filter_group = QGroupBox("조회 조건")
-        filters = QHBoxLayout(filter_group)
+        filters = QGridLayout(filter_group)
         filters.setContentsMargins(12, 18, 12, 10)
         self.client_combo = QComboBox()
         self.client_combo.setMinimumWidth(210)
@@ -60,15 +61,15 @@ class CounselingReportDialog(QDialog):
         search_btn = QPushButton("조건에 맞게 조회")
         set_button_role(search_btn, "primary")
         search_btn.clicked.connect(self.search_records)
-        filters.addWidget(QLabel("대상자"))
-        filters.addWidget(self.client_combo)
-        filters.addWidget(QLabel("상담 양식"))
-        filters.addWidget(self.template_combo)
-        filters.addWidget(QLabel("기간"))
-        filters.addWidget(self.date_from)
-        filters.addWidget(QLabel("~"))
-        filters.addWidget(self.date_to)
-        filters.addWidget(search_btn)
+        filters.addWidget(QLabel("대상자"), 0, 0)
+        filters.addWidget(self.client_combo, 0, 1)
+        filters.addWidget(QLabel("상담 양식"), 0, 2)
+        filters.addWidget(self.template_combo, 0, 3)
+        filters.addWidget(QLabel("시작일"), 1, 0)
+        filters.addWidget(self.date_from, 1, 1)
+        filters.addWidget(QLabel("종료일"), 1, 2)
+        filters.addWidget(self.date_to, 1, 3)
+        filters.addWidget(search_btn, 0, 4, 2, 1)
         root.addWidget(filter_group)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)

@@ -1,25 +1,98 @@
 """대상자별 사례관리 5대 업무를 한 화면에서 처리하는 작업판."""
 
+import json
 from typing import Optional
 
 from PyQt6.QtCore import QDate, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QComboBox, QDateEdit, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QSpinBox,
-    QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
+    QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QProgressBar,
+    QPushButton, QSpinBox, QTabWidget, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout,
     QWidget, QScrollArea,
 )
 
 from database import Database
 from case_forms import CaseFormsPanel
 from ui_theme import make_page_header, set_button_role
-from client_context import read_context
+from client_context import collect_source_index, read_context, source_key
 
 
 STAGES = ["접수", "사정", "계획", "개입", "점검", "종결", "사후관리"]
 ASSESSMENT_DOMAINS = ["경제", "건강", "주거", "돌봄", "가족관계", "사회관계", "고용·교육", "안전"]
 RISK_LEVELS = ["0 · 안정", "1 · 관찰", "2 · 주의", "3 · 긴급"]
+
+
+class ContextSourceDialog(QDialog):
+    """[맥락 다시 갱신]에서 어떤 자료를 다시 읽을지 고르는 창.
+
+    자료 종류별로 묶어 보여 주고, 지난번에 반영한 자료를 미리 골라 둔다.
+    """
+
+    def __init__(self, index, checked_keys, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("맥락에 반영할 자료 선택")
+        self.setMinimumSize(620, 520)
+        layout = QVBoxLayout(self)
+        guide = QLabel("선택한 자료만 다시 읽어 맥락 요약을 새로 정리합니다.\n"
+                       "고르지 않은 자료의 내용은 이번 요약에서 빠집니다. "
+                       "자료가 많을수록 시간이 오래 걸립니다.")
+        guide.setWordWrap(True)
+        layout.addWidget(guide)
+
+        toolbar = QHBoxLayout()
+        select_all = QPushButton("전체 선택")
+        select_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Checked))
+        clear_all = QPushButton("전체 해제")
+        clear_all.clicked.connect(lambda: self._set_all(Qt.CheckState.Unchecked))
+        toolbar.addWidget(select_all)
+        toolbar.addWidget(clear_all)
+        toolbar.addStretch(1)
+        self.count_label = QLabel()
+        toolbar.addWidget(self.count_label)
+        layout.addLayout(toolbar)
+
+        self.source_list = QListWidget()
+        layout.addWidget(self.source_list, stretch=1)
+        current_group = None
+        for entry in index:
+            if entry['group'] != current_group:
+                current_group = entry['group']
+                header = QListWidgetItem(f"— {current_group} —")
+                header.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.source_list.addItem(header)
+            item = QListWidgetItem(f"{entry['key']} · {entry['detail']}")
+            item.setData(Qt.ItemDataRole.UserRole, entry['key'])
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if entry['key'] in checked_keys
+                               else Qt.CheckState.Unchecked)
+            self.source_list.addItem(item)
+        # 항목을 다 넣은 뒤에 연결해야 목록을 만드는 동안 셈이 헛돌지 않는다.
+        self.source_list.itemChanged.connect(lambda _item: self._update_count())
+
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        box.button(QDialogButtonBox.StandardButton.Ok).setText("이 자료로 갱신")
+        box.button(QDialogButtonBox.StandardButton.Cancel).setText("취소")
+        box.accepted.connect(self.accept)
+        box.rejected.connect(self.reject)
+        layout.addWidget(box)
+        self._update_count()
+
+    def _checkable_items(self):
+        items = (self.source_list.item(row) for row in range(self.source_list.count()))
+        return [item for item in items if item.flags() & Qt.ItemFlag.ItemIsUserCheckable]
+
+    def _set_all(self, state):
+        for item in self._checkable_items():
+            item.setCheckState(state)
+
+    def _update_count(self):
+        self.count_label.setText(
+            f"선택 {len(self.selected_keys())}건 / 전체 {len(self._checkable_items())}건")
+
+    def selected_keys(self):
+        return [item.data(Qt.ItemDataRole.UserRole) for item in self._checkable_items()
+                if item.checkState() == Qt.CheckState.Checked]
 
 
 class CaseManagementPage(QWidget):
@@ -28,6 +101,8 @@ class CaseManagementPage(QWidget):
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
         self.db = db
+        # 이 화면은 탭 안으로 옮겨지며 parent()가 바뀌므로 메인 창을 따로 기억한다.
+        self.main_window = parent
         self.client_id: Optional[int] = None
         self.assessment_inputs = {}
         self._client_drafts = {}
@@ -58,6 +133,7 @@ class CaseManagementPage(QWidget):
         self.client_combo.currentIndexChanged.connect(self._on_client_changed)
         selector_layout.addWidget(self.client_combo)
         self.case_summary = QLabel("대상자를 선택해 주세요.")
+        self.case_summary.setWordWrap(True)
         self.case_summary.setObjectName("caseSummary")
         selector_layout.addWidget(self.case_summary, stretch=1)
         root.addWidget(selector)
@@ -80,14 +156,24 @@ class CaseManagementPage(QWidget):
         root.addWidget(stage_group)
 
         self.tabs = QTabWidget()
+        self.tabs.setUsesScrollButtons(True)
         context_page = QWidget()
         context_layout = QVBoxLayout(context_page)
         self.context_status = QLabel("등록·상담·서류 저장 후 로컬 AI가 자동으로 갱신합니다.")
         self.context_status.setWordWrap(True)
         context_layout.addWidget(self.context_status)
-        retry = QPushButton("맥락 다시 갱신")
-        retry.clicked.connect(self.retry_context)
-        context_layout.addWidget(retry)
+        # 갱신은 수십 초가 걸리므로 진행 중임을 눈에 보이게 알린다.
+        # 무한 반복 막대(range 0,0)는 계속 다시 그려지며 화면 검증 스크립트를 멈추게 하므로
+        # 실제로 처리한 자료 묶음 수를 그대로 보여 준다.
+        self.context_progress = QProgressBar()
+        self.context_progress.setRange(0, 1)
+        self.context_progress.setFormat('자료 %v/%m')
+        self.context_progress.setFixedHeight(16)
+        self.context_progress.hide()
+        context_layout.addWidget(self.context_progress)
+        self.context_retry_btn = QPushButton("맥락 다시 갱신")
+        self.context_retry_btn.clicked.connect(self.retry_context)
+        context_layout.addWidget(self.context_retry_btn)
         self.context_text = QTextEdit()
         self.context_text.setReadOnly(True)
         context_layout.addWidget(self.context_text)
@@ -103,25 +189,99 @@ class CaseManagementPage(QWidget):
             scroll.setWidget(page)
             self.tabs.addTab(scroll, title)
         root.addWidget(self.tabs, stretch=1)
+        self.tabs.setCurrentIndex(1)
+
+    def stop_timers(self):
+        """창을 닫거나 저장 위치를 바꿀 때 주기 갱신을 멈춘다."""
+        self.context_timer.stop()
+
+    def context_controller(self):
+        """메인 창의 맥락 갱신 작업 관리자. 창 준비 전에는 None."""
+        return getattr(self.main_window, 'context_controller', None)
+
+    def context_progress_state(self, context: dict):
+        """맥락 갱신 상태를 (안내문, 진행률, 버튼 사용 가능) 으로 정리한다.
+
+        진행률은 (처리한 자료 묶음, 전체 묶음)이며, 보여줄 진행이 없으면 None이다.
+        """
+        if not context:
+            return "대상자를 선택해 주세요.", None, False
+        if context['error']:
+            return ("갱신 실패 · " + context['error'] + " · [맥락 다시 갱신]을 눌러 주세요."), None, True
+
+        controller = self.context_controller()
+        running_for = controller.current_client_id() if controller else None
+        if running_for == self.client_id:
+            progress = controller.progress_values() or (0, 1)
+            return ("🔄 이 대상자 갱신 중 · " + controller.progress_text()), progress, False
+
+        if context['revision'] == context['processed_revision']:
+            return ("최신 기록 반영 완료 · " + (context['updated_at'] or '시각 기록 없음') + " UTC"), None, True
+
+        if controller and not controller.model_ready():
+            return ("로컬 AI 모델이 없어 갱신이 멈춰 있습니다. 모델을 준비하면 자동으로 이어서 갱신합니다."), None, True
+        if controller and controller.is_deferred(self.client_id, context['revision']):
+            return ("반영 대기 자료 있음 · 프로그램을 켜기 전에 밀린 기록이라 자동으로 갱신하지 않습니다. "
+                    "[맥락 다시 갱신]에서 반영할 자료를 골라 주세요."), None, True
+        if running_for:
+            other = self.db.get_client(running_for)
+            name = other['name'] if other else '다른 대상자'
+            return (f"갱신 대기 중 · {name}의 맥락을 처리한 뒤 이어서 시작합니다."), None, False
+        return "갱신 대기 중 · 곧 자동으로 시작합니다.", None, False
 
     def refresh_context(self):
-        context = read_context(self.db, self.client_id) if self.client_id else {}
-        status = "대상자를 선택해 주세요."
-        if context:
-            status = ("갱신 대기·처리 중 (로컬 AI 모델 설치 필요)" if context['revision'] != context['processed_revision']
-                      else "최신 기록 반영 완료 · " + context['updated_at'] + " UTC")
-            if context['error']:
-                status = "갱신 실패 · " + context['error'] + " · 다시 갱신을 눌러 주세요."
+        try:
+            context = read_context(self.db, self.client_id) if self.client_id else {}
+        except Exception as exc:
+            # 저장 위치가 사라졌거나 잠겨 있어도 프로그램이 멈추지 않게 한다.
+            self.context_status.setText(f'기록을 읽지 못했습니다 · 저장 위치를 확인하세요: {exc}')
+            self.context_progress.hide()
+            self.context_retry_btn.setEnabled(True)
+            self.context_retry_btn.setText('맥락 다시 갱신')
+            return
+        status, progress, can_retry = self.context_progress_state(context)
         self.context_status.setText(status + "\nAI 요약은 담당자 확인이 필요합니다. 근거 번호는 각 기록의 ID입니다.")
+        self.context_progress.setVisible(progress is not None)
+        if progress is not None:
+            value, maximum = progress
+            self.context_progress.setMaximum(max(1, maximum))
+            self.context_progress.setValue(value)
+        self.context_retry_btn.setEnabled(can_retry)
+        self.context_retry_btn.setText("맥락 다시 갱신" if can_retry else "갱신 중…")
         text = context.get('summary', '') + "\n\n[근거 자료]\n" + context.get('sources', '')
         if self.context_text.toPlainText() != text:
             self.context_text.setPlainText(text)
 
     def retry_context(self):
-        if self.client_id:
-            with self.db.get_connection() as conn:
-                conn.execute("UPDATE client_context SET revision=revision+1, error='' WHERE client_id=?", (self.client_id,))
-            self.refresh_context()
+        """반영할 자료를 직접 고른 뒤 맥락을 새로 정리하도록 예약한다."""
+        if not self.client_id:
+            return
+        try:
+            index = collect_source_index(self.db, self.client_id)
+            context = read_context(self.db, self.client_id)
+        except Exception as exc:
+            QMessageBox.warning(self, "맥락 다시 갱신", f"자료 목록을 읽지 못했습니다.\n저장 위치를 확인하세요: {exc}")
+            return
+        if not index:
+            QMessageBox.information(self, "맥락 다시 갱신", "이 대상자에게 아직 반영할 자료가 없습니다.")
+            return
+        reflected = {source_key(line) for line in (context.get('sources') or '').splitlines() if line.strip()}
+        # 지난번에 반영한 자료를 미리 골라 두고, 이력이 없으면 전체를 고른 상태로 연다.
+        dialog = ContextSourceDialog(index, reflected or {entry['key'] for entry in index}, self)
+        if not dialog.exec():
+            return
+        chosen = dialog.selected_keys()
+        if not chosen:
+            QMessageBox.information(self, "맥락 다시 갱신", "반영할 자료를 하나 이상 골라 주세요.")
+            return
+        with self.db.get_connection() as conn:
+            conn.execute("UPDATE client_context SET revision=revision+1, error='', "
+                         "mode='selected', selection=? WHERE client_id=?",
+                         (json.dumps(chosen, ensure_ascii=False), self.client_id))
+        self.status_message.emit(f"선택한 자료 {len(chosen)}건으로 맥락 갱신을 요청했습니다. "
+                                 "진행 상황은 왼쪽 아래 AI 작업 상태에서 확인하세요.")
+        # 누른 즉시 대기·진행 표시가 바뀌도록 화면을 바로 다시 그린다.
+        self.refresh_context()
 
     @staticmethod
     def _date_edit(days_from_today: int = 0) -> QDateEdit:

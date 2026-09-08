@@ -74,8 +74,7 @@ class InferenceEngine:
         # Gemma-2 특화 종료 토큰
         stop_tokens = ["<end_of_turn>", "<eos>", "<start_of_turn>"]
 
-        try:
-            stream = self.llm(
+        stream = self.llm(
                 prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -84,7 +83,7 @@ class InferenceEngine:
                 stream=True,
                 stop=stop_tokens
             )
-
+        try:
             for output in stream:
                 if self.stop_flag:
                     break
@@ -109,15 +108,17 @@ class InferenceEngine:
                 }
 
         finally:
-            elapsed = time.time() - start_time
-            final_tps = (token_count / elapsed) if elapsed > 0 else 0.0
-            yield {
-                "token": "",
-                "tokens_sec": final_tps,
-                "total_tokens": token_count,
-                "done": True,
-                "aborted": self.stop_flag
-            }
+            if hasattr(stream, 'close'):
+                stream.close()
+        # 예외가 발생하면 완료 신호를 내보내지 않고 호출자에게 전달한다.
+        elapsed = time.time() - start_time
+        yield {
+            "token": "",
+            "tokens_sec": token_count / elapsed if elapsed > 0 else 0.0,
+            "total_tokens": token_count,
+            "done": True,
+            "aborted": self.stop_flag,
+        }
 
     @staticmethod
     def get_system_memory_info() -> Dict[str, Any]:

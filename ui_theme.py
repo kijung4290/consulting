@@ -32,7 +32,7 @@ def make_page_header(title: str, description: str, eyebrow: str) -> QFrame:
     frame.setObjectName("pageHeader")
 
     root = QHBoxLayout(frame)
-    root.setContentsMargins(18, 14, 18, 14)
+    root.setContentsMargins(14, 10, 14, 10)
     root.setSpacing(14)
 
     marker = QFrame()
@@ -52,7 +52,8 @@ def make_page_header(title: str, description: str, eyebrow: str) -> QFrame:
     description_label.setObjectName("pageDescription")
     description_label.setWordWrap(True)
 
-    text_layout.addWidget(eyebrow_label)
+    # 실제 업무 제목과 안내를 우선 표시한다.
+    eyebrow_label.hide()
     text_layout.addWidget(title_label)
     text_layout.addWidget(description_label)
     root.addLayout(text_layout, stretch=1)
@@ -105,6 +106,7 @@ def make_action_card(
 
 
 APP_STYLESHEET = f"""
+    QWidget {{ font-family: "Malgun Gothic", "Noto Sans KR", sans-serif; font-size: 12px; }}
     QMainWindow {{
         background-color: {COLORS['canvas']};
         font-family: "Pretendard", "Noto Sans KR", "Segoe UI", "Malgun Gothic", sans-serif;
@@ -119,8 +121,9 @@ APP_STYLESHEET = f"""
     #brandSubtitle {{ color: #A9C4BE; font-size: 11px; }}
     #navSection {{ color: #789B94; font-size: 10px; font-weight: 800; padding: 14px 12px 2px 12px; }}
     #navBtn {{
+        min-height: 20px;
         text-align: left;
-        padding: 12px 14px;
+        padding: 8px 14px;
         background-color: transparent;
         color: #BBD0CB;
         border: none;
@@ -152,6 +155,7 @@ APP_STYLESHEET = f"""
     #storageBar {{ background-color: #EAF1EE; border: 1px solid #CFDCD7; border-radius: 8px; }}
     #storagePath {{ color: #36534E; font-family: Consolas, "Malgun Gothic"; font-size: 11px; }}
     #sectionHint {{ color: {COLORS['muted']}; font-size: 12px; padding: 2px 0; }}
+    #draftStatus {{ color: {COLORS['primary']}; background: {COLORS['primary_soft']}; padding: 8px; border-radius: 6px; font-size: 12px; }}
     #warningHint {{ background-color: #FFF6E8; color: #805215; border: 1px solid #F0D6AA; border-radius: 7px; padding: 8px 10px; font-size: 11px; }}
     #caseSelector {{ background-color: #EAF1EE; border: 1px solid #CFDCD7; border-radius: 8px; }}
     #caseSummary {{ color: #4E6661; font-size: 11px; }}
@@ -182,8 +186,8 @@ APP_STYLESHEET = f"""
         color: #344B48;
     }}
     QPushButton {{
-        min-height: 30px;
-        padding: 5px 12px;
+        min-height: 26px;
+        padding: 4px 10px;
         border-radius: 7px;
         border: 1px solid #BBCAC5;
         background-color: #FFFFFF;
@@ -191,6 +195,7 @@ APP_STYLESHEET = f"""
         font-weight: 650;
     }}
     QPushButton:hover {{ background-color: #F0F5F3; border-color: #8BA59E; }}
+    #compactButton {{ min-height: 18px; padding: 3px 8px; font-size: 11px; }}
     QPushButton:focus {{ border: 2px solid {COLORS['primary']}; padding: 4px 11px; }}
     QPushButton:disabled {{ background-color: #EDF1EF; color: #9AA8A4; border-color: #DCE4E1; }}
     QPushButton[role="primary"] {{ background-color: {COLORS['primary']}; color: #FFFFFF; border: none; font-weight: 800; }}
@@ -199,6 +204,12 @@ APP_STYLESHEET = f"""
     #primaryActionButton:hover {{ background-color: {COLORS['primary_hover']}; }}
     QPushButton[role="soft"] {{ background-color: {COLORS['primary_soft']}; color: #145A4D; border-color: #B9D5CD; }}
     QPushButton[role="danger"] {{ background-color: {COLORS['danger_soft']}; color: {COLORS['danger']}; border-color: #F0C6CC; }}
+    QPushButton[role]:disabled {{ background-color: #EDF1EF; color: #71847D; border: 1px solid #DCE4E1; }}
+    QPushButton[role]:focus {{ border: 2px solid {COLORS['accent']}; }}
+    QMenu {{ background: #FFFFFF; color: {COLORS['ink']}; padding: 6px; border: 1px solid {COLORS['line']}; }}
+    QMenu::item {{ padding: 8px 20px; }}
+    QMenu::item:selected {{ background: {COLORS['primary_soft']}; }}
+    QMenu::item:disabled {{ color: #71847D; }}
     QTableWidget {{
         background-color: #FFFFFF;
         alternate-background-color: #F8FAF9;

@@ -94,15 +94,19 @@ def context(db, cid):
 
 
 def ui_checks(db, owner, cid, app):
-    from app import MainWindow
+    from app import MainWindow, NAV_MENUS
     from counseling_report import CounselingReportDialog
     from pypdf import PdfReader
     window = MainWindow()
     window.context_controller.stop()
     window.show()
-    for index in range(7):
+    for _, index in NAV_MENUS:
         window.switch_page(index)
         app.processEvents()
+    for tabs in (window.client_tabs, window.docs_tabs, window.data_tabs):
+        for tab_index in range(tabs.count()):
+            tabs.setCurrentIndex(tab_index)
+            app.processEvents()
     window.doc_filter_client.setCurrentIndex(window.doc_filter_client.findData(cid))
     window.doc_filter_type.setCurrentIndex(0)
     window.doc_search_input.clear()

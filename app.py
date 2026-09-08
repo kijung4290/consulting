@@ -1,14 +1,16 @@
 """
 사회복지 스마트 사례관리 SaaS 어시스턴트 - PyQt6 데스크톱 프로그램
-- 📊 업무 대시보드 (KPI 통계, 최근 상담 요약)
-- 👥 대상자 통합 관리 (신규 등록, 검색/필터, 위기도 관리, 상세 이력)
-- 📝 AI 상담일지 작성실 (Gemma-2 로컬 보안 AI + 13대 서식 + 대상자 자동 연동 및 영구 저장)
-- 📂 서류/문서 보관함 (초기면접지, 동의서, HWP/PDF 원클릭 열람)
-- ⚙️ 데이터 관리 및 백업 (SQLite DB 원클릭 USB 백업/복원)
+
+업무 메뉴는 현장에서 실제로 나누어 쓰는 네 가지 일로만 구성한다.
+- 👥 대상자 관리 (업무 현황 요약 + 대상자 등록·검색·위기도 + 확인할 일정·최근 기록)
+- 🗂 사례관리 (AI 대상자 맥락, 단계별 서류, 사정·목표·모니터링·연계 등 전체 과정 검토)
+- 📝 서류작성 및 보관함 (상담일지 작성 + 첨부·직접 작성 서류 검색·열람)
+- ⚙️ 데이터 관리 (서류 양식 편집 + 전체 백업·복원, 저장 위치)
 """
 
 import os
 import sys
+import time
 
 # pythonw.exe 실행 시 stdout/stderr가 None이어 crash되는 현상 방지
 if sys.stdout is None:
@@ -23,14 +25,15 @@ if sys.stderr is None:
         pass
 
 from datetime import datetime
+from counseling_workspace import CounselingWorkspaceMixin
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QTextEdit, QComboBox, QPushButton, QCheckBox, QLineEdit,
     QProgressBar, QSplitter, QGroupBox, QFileDialog, QMessageBox,
     QStatusBar, QStackedWidget, QTableWidget, QTableWidgetItem,
-    QHeaderView, QFrame, QScrollArea, QInputDialog, QDateEdit, QDialog
+    QHeaderView, QFrame, QScrollArea, QInputDialog, QDateEdit, QDialog, QTabWidget
 )
-from PyQt6.QtCore import Qt, QEvent, QMimeData, QDate
+from PyQt6.QtCore import Qt, QEvent, QMimeData, QDate, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 
 # 내부 모듈 로드
@@ -53,7 +56,38 @@ from counseling_report import CounselingReportDialog
 from template_manager import TemplateManagerPage
 from form_document import build_form_html, fill_form_html, inject_approval_line
 
-class MainWindow(QMainWindow):
+# 사이드바 "업무 메뉴"와 QStackedWidget 인덱스를 한 곳에서 관리한다.
+PAGE_CLIENTS = 0
+PAGE_CASE = 1
+PAGE_DOCS = 2
+PAGE_DATA = 3
+
+NAV_MENUS = (
+    ("대상자 관리", PAGE_CLIENTS),
+    ("사례관리", PAGE_CASE),
+    ("서류작성 및 보관함", PAGE_DOCS),
+    ("데이터 관리", PAGE_DATA),
+)
+
+# 대상자 관리 화면 안의 보조 탭
+CLIENT_TAB_LIST = 0
+CLIENT_TAB_DUE = 1
+CLIENT_TAB_RECENT = 2
+CLIENT_TAB_DOCS = 3
+
+# 서류작성 및 보관함 화면 안의 탭
+DOCS_TAB_WRITE = 0
+DOCS_TAB_VAULT = 1
+
+# 데이터 관리 화면 안의 탭
+DATA_TAB_FORMS = 0
+DATA_TAB_BACKUP = 1
+
+# 사례관리 작업판의 탭
+CASE_TAB_CONTEXT = 0
+CASE_TAB_MONITORING = 4
+
+class MainWindow(CounselingWorkspaceMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("복지상담 기록실 · 로컬 AI 사례관리")
@@ -86,15 +120,26 @@ class MainWindow(QMainWindow):
         self.model_load_worker = None
         self.pending_prompt = None
         self.last_generated_raw_text = ""
+        self.ai_started_at = None
 
         self.init_ui()
         self.apply_styling()
         self.check_and_load_model()
         self.refresh_all_data()
+        self.update_system_status()
 
         self.context_controller = ContextController(self)
 
     def closeEvent(self, event):
+        if not self.template_manager_page.may_leave():
+            event.ignore()
+            return
+        if not self.persist_counseling_draft():
+            event.ignore()
+            return
+        # 창을 닫은 뒤에도 주기 갱신이 남아 있으면 사라진 저장 위치를 읽다가 프로그램이 죽는다.
+        self.activity_timer.stop()
+        self.case_management_page.stop_timers()
         self.context_controller.stop()
         for worker in (self.worker, self.model_load_worker):
             if worker and worker.isRunning():
@@ -112,7 +157,8 @@ class MainWindow(QMainWindow):
         # ================= [좌측: SaaS 네비게이션 사이드바] =================
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(224)
+        sidebar.setMinimumWidth(186)
+        sidebar.setMaximumWidth(204)
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(12, 16, 12, 16)
         sidebar_layout.setSpacing(8)
@@ -120,7 +166,7 @@ class MainWindow(QMainWindow):
         # 앱 브랜드: 현장의 '상담 기록지'를 닮은 차분한 업무 도구
         app_title = QLabel("복지상담 기록실")
         app_title.setObjectName("brandTitle")
-        app_subtitle = QLabel("LOCAL CASEWORK DESK")
+        app_subtitle = QLabel("상담 · 기록 · 사례관리")
         app_subtitle.setObjectName("brandSubtitle")
 
         sidebar_layout.addWidget(app_title)
@@ -130,19 +176,10 @@ class MainWindow(QMainWindow):
         nav_section.setObjectName("navSection")
         sidebar_layout.addWidget(nav_section)
 
-        # 메뉴 버튼들
+        # 메뉴 버튼들 (업무 메뉴는 네 가지 일로만 유지한다)
         self.nav_btns = []
-        menus = [
-            ("업무 현황", 0),
-            ("대상자 관리", 1),
-            ("사례관리", 2),
-            ("상담일지 작성", 3),
-            ("서류 보관함", 4),
-            ("서류 양식 관리", 5),
-            ("데이터 관리", 6)
-        ]
 
-        for text, page_idx in menus:
+        for text, page_idx in NAV_MENUS:
             btn = QPushButton(text)
             btn.setObjectName("navBtn")
             btn.setFont(QFont("Malgun Gothic", 10))
@@ -162,7 +199,7 @@ class MainWindow(QMainWindow):
         profile_row = QHBoxLayout()
         profile_row.setSpacing(5)
         self.profile_combo = QComboBox()
-        self.profile_combo.setMinimumWidth(150)
+        self.profile_combo.setMinimumWidth(110)
         self.profile_combo.currentIndexChanged.connect(self.on_profile_changed)
         add_profile_btn = QPushButton("＋")
         add_profile_btn.setToolTip("새 사용자 프로필 만들기")
@@ -195,38 +232,51 @@ class MainWindow(QMainWindow):
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         sidebar_layout.addWidget(self.fullscreen_btn)
 
+        sidebar_layout.addWidget(self.build_activity_box())
+
         # 보안 배지
-        security_box = QGroupBox()
-        security_box.setStyleSheet("background-color: #102F2B; border: 1px solid #2C5751; border-radius: 7px; padding: 6px;")
+        security_box = QFrame()
+        security_box.setObjectName('securityBox')
+        security_box.setStyleSheet("QFrame#securityBox { background-color: #102F2B; border: 1px solid #2C5751; border-radius: 7px; }")
         sec_layout = QVBoxLayout(security_box)
         sec_label = QLabel("● 로컬 처리 중")
         sec_label.setStyleSheet("color: #7FD1BF; font-weight: bold; font-size: 11px;")
         sec_desc = QLabel("AI 입력은 외부로 전송하지 않음\n데이터는 지정 폴더에 보관")
+        sec_desc.setWordWrap(True)
         sec_desc.setStyleSheet("color: #94A3B8; font-size: 10px;")
         sec_layout.addWidget(sec_label)
         sec_layout.addWidget(sec_desc)
         sidebar_layout.addWidget(security_box)
 
-        root_layout.addWidget(sidebar)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFixedWidth(204)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setWidget(sidebar)
+        root_layout.addWidget(sidebar_scroll)
 
-        # ================= [우측: 스택 위젯 (메인 화면들)] =================
-        self.stacked_widget = QStackedWidget()
-        self.stacked_widget.addWidget(self.create_dashboard_page())  # Page 0
-        self.stacked_widget.addWidget(self.create_clients_page())    # Page 1
-        self.case_management_page = CaseManagementPage(self.db, self)
-        self.case_management_page.status_message.connect(lambda message: self.status_bar.showMessage(message, 4000))
-        self.stacked_widget.addWidget(self.case_management_page)     # Page 2
-        self.stacked_widget.addWidget(self.create_ai_counsel_page()) # Page 3
-        self.stacked_widget.addWidget(self.create_documents_page())  # Page 4
+        # ================= [우측: 스택 위젯 (업무 메뉴 4화면)] =================
         self.template_manager_page = TemplateManagerPage(
             self.db,
             self.current_profile["id"],
             on_templates_changed=self.refresh_template_combo,
             parent=self,
         )
-        self.stacked_widget.addWidget(self.template_manager_page)     # Page 5
-        self.stacked_widget.addWidget(self.create_settings_page())    # Page 6
+        self.case_management_page = CaseManagementPage(self.db, self)
+        self.case_management_page.status_message.connect(lambda message: self.status_bar.showMessage(message, 4000))
 
+        self.stacked_widget = QStackedWidget()
+        self.stacked_widget.addWidget(self.create_clients_page())    # PAGE_CLIENTS
+        self.stacked_widget.addWidget(self.case_management_page)     # PAGE_CASE
+        self.stacked_widget.addWidget(self.create_docs_page())       # PAGE_DOCS
+        self.stacked_widget.addWidget(self.create_data_page())       # PAGE_DATA
+
+        # 화면 최소 크기가 전체 창을 밀어내지 않도록 각 작업면을 스크롤 가능하게 한다.
+        pages = [self.stacked_widget.widget(i) for i in range(self.stacked_widget.count())]
+        for content in pages:
+            self.stacked_widget.removeWidget(content)
+            self.stacked_widget.addWidget(self.wrap_in_scroll(content))
         root_layout.addWidget(self.stacked_widget, stretch=1)
         self.refresh_profile_combo()
 
@@ -236,17 +286,30 @@ class MainWindow(QMainWindow):
         self.status_model_label = QLabel("모델: 확인 중...")
         self.status_sys_label = QLabel("시스템: 준비 중")
         self.status_speed_label = QLabel("속도: 대기 중")
+        self.status_activity_label = QLabel()
 
         self.status_bar.addWidget(self.status_model_label, stretch=2)
         self.status_bar.addWidget(self.status_sys_label, stretch=2)
+        self.status_bar.addPermanentWidget(self.status_activity_label)
         self.status_bar.addPermanentWidget(self.status_speed_label)
+
+        # 백그라운드 AI 작업은 화면 어디에 있어도 보여야 한다.
+        self.activity_timer = QTimer(self)
+        self.activity_timer.timeout.connect(self.refresh_activity_indicator)
+        self.activity_timer.start(1000)
+        self.refresh_activity_indicator()
 
         # 단축키 설정
         shortcut_run = QShortcut(QKeySequence("Ctrl+Return"), self)
-        shortcut_run.activated.connect(self.start_generation)
+        shortcut_run.activated.connect(lambda: self.start_generation() if self.on_counseling_tab() else None)
 
         shortcut_esc = QShortcut(QKeySequence("Escape"), self)
         shortcut_esc.activated.connect(self.stop_generation)
+
+        shortcut_save = QShortcut(QKeySequence('Ctrl+S'), self)
+        shortcut_save.activated.connect(lambda: self.save_record_to_database() if self.on_counseling_tab() else None)
+        shortcut_find = QShortcut(QKeySequence('Ctrl+F'), self)
+        shortcut_find.activated.connect(self.focus_client_search)
 
         # F11 전체화면 단축키
         shortcut_f11 = QShortcut(QKeySequence("F11"), self)
@@ -271,25 +334,188 @@ class MainWindow(QMainWindow):
                     self.fullscreen_btn.setText("⛶ 전체화면 (F11)")
         super().changeEvent(event)
 
+    def build_activity_box(self) -> QFrame:
+        """지금 AI가 무엇을 하고 있는지 사이드바에 항상 보여 준다."""
+        box = QFrame()
+        box.setObjectName("activityBox")
+        box.setStyleSheet(
+            "QFrame#activityBox { background-color: #14213A; border: 1px solid #2C3E63;"
+            " border-radius: 7px; }"
+        )
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(4)
+
+        caption = QLabel("AI 작업 상태")
+        caption.setStyleSheet("color: #93A4C4; font-size: 10px; font-weight: 700;")
+        layout.addWidget(caption)
+
+        self.activity_title = QLabel()
+        self.activity_title.setWordWrap(True)
+        self.activity_title.setStyleSheet("color: #DCE6F7; font-size: 11px; font-weight: 700;")
+        layout.addWidget(self.activity_title)
+
+        self.activity_detail = QLabel()
+        self.activity_detail.setWordWrap(True)
+        self.activity_detail.setStyleSheet("color: #93A4C4; font-size: 10px;")
+        layout.addWidget(self.activity_detail)
+
+        # 무한 반복 막대(range 0,0)는 계속 다시 그려지며 화면 검증 스크립트를 멈추게 한다.
+        # 실제 진행률을 알 수 있을 때만 막대를 보여 주고, 그 밖에는 경과 시간으로 알린다.
+        self.activity_bar = QProgressBar()
+        self.activity_bar.setRange(0, 1)
+        self.activity_bar.setTextVisible(False)
+        self.activity_bar.setFixedHeight(8)
+        self.activity_bar.setStyleSheet(
+            "QProgressBar { background-color: #0D1728; border: none; border-radius: 4px; }"
+            "QProgressBar::chunk { background-color: #4C8BF5; border-radius: 4px; }"
+        )
+        self.activity_bar.hide()
+        layout.addWidget(self.activity_bar)
+        return box
+
+    def ai_elapsed_text(self) -> str:
+        """작업이 살아 있음을 보여 주는 경과 시간. 매 초 값이 바뀐다."""
+        if self.ai_started_at is None:
+            return ""
+        return f" · {int(time.monotonic() - self.ai_started_at)}초 경과"
+
+    def current_ai_activity(self):
+        """지금 돌고 있는 AI 작업을 (제목, 설명, 진행률)로 돌려준다. 없으면 None.
+
+        진행률은 (처리한 양, 전체 양)이며, 남은 양을 알 수 없으면 None이다.
+        """
+        if self.download_worker and self.download_worker.isRunning():
+            return "AI 모델 내려받는 중", "처음 한 번만 필요합니다. 창을 닫지 마세요.", None
+        if self.model_load_worker and self.model_load_worker.isRunning():
+            return ("AI 모델 불러오는 중",
+                    "최초 실행은 20초 이상 걸릴 수 있습니다" + self.ai_elapsed_text(), None)
+        if self.worker and self.worker.isRunning():
+            return "상담일지 초안 작성 중", self.status_speed_label.text() + self.ai_elapsed_text(), None
+        controller = getattr(self, "context_controller", None)
+        client_id = controller.current_client_id() if controller else None
+        if client_id:
+            name = self.client_name(client_id) or "대상자"
+            return f"{name} 맥락 갱신 중", controller.progress_text(), controller.progress_values()
+        return None
+
+    def client_name(self, client_id: int):
+        """표시용 대상자 성명. 저장 위치를 읽을 수 없으면 None."""
+        try:
+            client = self.db.get_client(client_id)
+        except Exception:
+            return None
+        return client["name"] if client else None
+
+    def refresh_activity_indicator(self):
+        """사이드바 표시판과 상태바를 현재 AI 작업에 맞춘다."""
+        activity = self.current_ai_activity()
+        if activity:
+            title, detail, progress = activity
+            self.activity_title.setText("● " + title)
+            self.activity_title.setStyleSheet("color: #9DC2FF; font-size: 11px; font-weight: 700;")
+            self.activity_detail.setText(detail)
+            self.activity_bar.setVisible(progress is not None)
+            if progress is not None:
+                value, maximum = progress
+                self.activity_bar.setMaximum(max(1, maximum))
+                self.activity_bar.setValue(value)
+            self.status_activity_label.setText(f"AI 작업: {title}")
+            self.status_activity_label.setToolTip(detail)
+            return
+
+        waiting = self.count_pending_context()
+        deferred = self.count_deferred_context()
+        # 프로그램을 켜기 전부터 밀려 있던 건은 자동으로 돌지 않으므로 따로 알린다.
+        deferred_text = (f" 프로그램을 켜기 전에 밀린 대상자 {deferred}명은 사례관리 화면의 "
+                         "[맥락 다시 갱신]에서 자료를 골라 반영하세요." if deferred else "")
+        if not self.model_ready():
+            self.activity_title.setText("○ AI 모델 없음")
+            self.activity_title.setStyleSheet("color: #E8B87A; font-size: 11px; font-weight: 700;")
+            self.activity_detail.setText(
+                (f"대상자 {waiting}명의 맥락 갱신이 기다리고 있습니다. 모델을 준비하면 이어서 진행합니다."
+                 if waiting else "직접 작성은 모델 없이도 사용할 수 있습니다.") + deferred_text)
+            self.status_activity_label.setText("AI 작업: 모델 없음")
+        elif waiting:
+            self.activity_title.setText("○ 갱신 대기 중")
+            self.activity_title.setStyleSheet("color: #DCE6F7; font-size: 11px; font-weight: 700;")
+            self.activity_detail.setText(f"대상자 {waiting}명의 맥락을 곧 갱신합니다." + deferred_text)
+            self.status_activity_label.setText(f"AI 작업: 대기 {waiting}명")
+        else:
+            self.activity_title.setText("○ 진행 중인 작업 없음")
+            self.activity_title.setStyleSheet("color: #DCE6F7; font-size: 11px; font-weight: 700;")
+            self.activity_detail.setText("기록을 저장하면 맥락을 자동으로 갱신합니다." + deferred_text)
+            self.status_activity_label.setText("AI 작업: 없음")
+        self.activity_bar.hide()
+        self.status_activity_label.setToolTip(self.activity_detail.text())
+
+    def count_pending_context(self) -> int:
+        controller = getattr(self, "context_controller", None)
+        if not controller:
+            return 0
+        try:
+            return len(controller.pending_client_ids())
+        except Exception:
+            return 0
+
+    def count_deferred_context(self) -> int:
+        """프로그램을 켤 때부터 밀려 있어 직접 눌러야 갱신되는 대상자 수."""
+        controller = getattr(self, "context_controller", None)
+        if not controller or not hasattr(controller, "deferred_client_ids"):
+            return 0
+        try:
+            return len(controller.deferred_client_ids())
+        except Exception:
+            return 0
+
+    @staticmethod
+    def wrap_in_scroll(content: QWidget) -> QScrollArea:
+        """내용이 창보다 커도 화면이 잘리지 않도록 스크롤 영역으로 감싼다."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+        scroll.setWidget(content)
+        return scroll
+
     def switch_page(self, page_idx: int):
         self.stacked_widget.setCurrentIndex(page_idx)
         for i, btn in enumerate(self.nav_btns):
             btn.setChecked(i == page_idx)
-        
+
         # 페이지 전환 시 데이터 자동 갱신
-        if page_idx == 0:
+        if page_idx == PAGE_CLIENTS:
             self.refresh_dashboard()
-        elif page_idx == 1:
             self.refresh_clients_table()
-        elif page_idx == 2:
+        elif page_idx == PAGE_CASE:
             self.case_management_page.refresh_clients()
-        elif page_idx == 3:
+        elif page_idx == PAGE_DOCS:
             self.refresh_ai_client_combo()
-        elif page_idx == 4:
             self.populate_doc_client_filter()
             self.refresh_documents_table()
-        elif page_idx == 5:
+        elif page_idx == PAGE_DATA:
             self.template_manager_page.refresh_templates()
+
+    def on_counseling_tab(self) -> bool:
+        """Ctrl+Enter·Ctrl+S 단축키는 상담일지 작성 탭이 열린 동안에만 동작한다."""
+        return (self.stacked_widget.currentIndex() == PAGE_DOCS
+                and self.docs_tabs.currentIndex() == DOCS_TAB_WRITE)
+
+    def open_client_tab(self, tab_idx: int):
+        self.switch_page(PAGE_CLIENTS)
+        self.client_tabs.setCurrentIndex(tab_idx)
+
+    def open_counseling_writer(self):
+        self.switch_page(PAGE_DOCS)
+        self.docs_tabs.setCurrentIndex(DOCS_TAB_WRITE)
+
+    def open_document_vault(self):
+        self.switch_page(PAGE_DOCS)
+        self.docs_tabs.setCurrentIndex(DOCS_TAB_VAULT)
+
+    def open_form_designer(self):
+        self.switch_page(PAGE_DATA)
+        self.data_tabs.setCurrentIndex(DATA_TAB_FORMS)
 
     def refresh_profile_combo(self, select_id: int = None):
         """로컬 작업자 목록을 갱신하고 현재 작업자를 유지합니다."""
@@ -332,6 +558,12 @@ class MainWindow(QMainWindow):
             self._activate_profile(profile_id)
 
     def _activate_profile(self, profile_id: int):
+        if self._generation_busy or not self.persist_counseling_draft():
+            self.refresh_profile_combo()
+            return
+        if not self.template_manager_page.may_leave():
+            self.refresh_profile_combo()
+            return
         self.db.set_current_profile(profile_id)
         self.current_profile = self.db.get_profile(profile_id)
         self.db.ensure_builtin_templates(profile_id, TEMPLATES)
@@ -339,107 +571,19 @@ class MainWindow(QMainWindow):
             self.template_manager_page.set_profile(profile_id)
         if hasattr(self, "tmpl_combo"):
             self.refresh_template_combo()
+        self.restore_counseling_draft()
         self.status_bar.showMessage(
             f"현재 사용자를 '{self.current_profile['name']}'(으)로 전환했습니다.",
             4000,
         )
 
     # ================= [PAGE 0: 대시보드] =================
-    def create_dashboard_page(self) -> QWidget:
-        page = QWidget()
-        page.setObjectName("pageRoot")
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(16)
-
-        layout.addWidget(make_page_header(
-            "오늘의 사례관리 현황",
-            "대상자, 상담 기록, 서류 현황을 한눈에 확인하고 이어서 처리합니다.",
-            "CASEWORK OVERVIEW",
-        ))
-
-        # 1. KPI 카드 영역 (토스 스타일 위젯)
-        kpi_layout = QHBoxLayout()
-        kpi_layout.setSpacing(14)
-
-        self.kpi_clients = self.create_kpi_card("총 관리 대상자", "0명", "#176B5B", "#E3F0EC", "등록된 전체 사례 대상자", lambda: self.switch_page(1))
-        self.kpi_high_risk = self.create_kpi_card("고위기 집중관리", "0명", "#B83A4B", "#FCEBED", "집중 모니터링 필요 대상", self.nav_to_high_risk_clients)
-        self.kpi_monthly = self.create_kpi_card("이달의 상담 실적", "0건", "#237A64", "#E7F3EF", "이번 달 누적 상담 기록", lambda: self.switch_page(3))
-        self.kpi_docs = self.create_kpi_card("등록 서류", "0건", "#A76318", "#FFF1DC", "작성 서류·상담일지·첨부 파일", lambda: self.switch_page(4))
-
-        kpi_layout.addWidget(self.kpi_clients)
-        kpi_layout.addWidget(self.kpi_high_risk)
-        kpi_layout.addWidget(self.kpi_monthly)
-        kpi_layout.addWidget(self.kpi_docs)
-        layout.addLayout(kpi_layout)
-
-        # 2. 퀵 액션 바
-        action_layout = QHBoxLayout()
-        action_layout.setSpacing(8)
-        act_label = QLabel("⚡ 빠른 실행:")
-        act_label.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        act_label.setStyleSheet("color: #475569; padding-right: 4px;")
-        action_layout.addWidget(act_label)
-
-        btn_new_client = QPushButton("➕ 신규 대상자 등록")
-        set_button_role(btn_new_client, "primary")
-        btn_new_client.clicked.connect(self.open_new_client_dialog)
-
-        btn_new_counsel = QPushButton("🚀 AI 상담일지 작성")
-        set_button_role(btn_new_counsel, "soft")
-        btn_new_counsel.clicked.connect(lambda: self.switch_page(3))
-
-        btn_manual_counsel = QPushButton("✍️ 수기 상담일지 직접 작성")
-        set_button_role(btn_manual_counsel, "soft")
-        btn_manual_counsel.clicked.connect(self.open_manual_counseling_dialog)
-
-        btn_new_doc = QPushButton("📂 서류 첨부")
-        btn_new_doc.clicked.connect(self.open_new_document_dialog)
-
-        btn_typed_memo = QPushButton("✍️ 직접 메모/서류 작성")
-        btn_typed_memo.clicked.connect(self.open_new_typed_memo_dialog)
-
-        action_layout.addWidget(btn_new_client)
-        action_layout.addWidget(btn_new_counsel)
-        action_layout.addWidget(btn_manual_counsel)
-        action_layout.addWidget(btn_new_doc)
-        action_layout.addWidget(btn_typed_memo)
-        action_layout.addStretch()
-        layout.addLayout(action_layout)
-
-        self.case_due_btn = QPushButton("모니터링 일정을 확인하세요")
-        self.case_due_btn.setObjectName("caseDueButton")
-        self.case_due_btn.clicked.connect(lambda: self.switch_page(2))
-        layout.addWidget(self.case_due_btn)
-
-        # 3. 최근 상담 및 개입 기록 테이블
-        recent_group = QGroupBox("최근 상담 및 개입 기록 (최근 5건 - 더블 클릭 시 상세 카드 열림)")
-        rg_layout = QVBoxLayout(recent_group)
-        rg_layout.setContentsMargins(12, 16, 12, 12)
-
-        self.dash_table = QTableWidget()
-        self.dash_table.setColumnCount(5)
-        self.dash_table.setHorizontalHeaderLabels(["대상자 성명", "가명(비식별)", "상담 일자", "서식/종류", "핵심 요약"])
-        self.dash_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
-        self.dash_table.verticalHeader().setDefaultSectionSize(40)
-        self.dash_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.dash_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.dash_table.cellDoubleClicked.connect(self.on_dash_record_double_clicked)
-        rg_layout.addWidget(self.dash_table)
-
-        layout.addWidget(recent_group, stretch=1)
-        documents_group = QGroupBox('최근 등록·수정 서류 (더블 클릭으로 열기)')
-        documents_layout = QVBoxLayout(documents_group)
-        self.dash_documents_table = QTableWidget(0, 4)
-        self.dash_documents_table.setHorizontalHeaderLabels(['대상자', '서류명', '구분', '등록·수정일'])
-        self.dash_documents_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.dash_documents_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.dash_documents_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.dash_documents_table.cellDoubleClicked.connect(
-            lambda row, _col: self.open_registry_document(self.dash_documents_table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
-        documents_layout.addWidget(self.dash_documents_table)
-        layout.addWidget(documents_group, stretch=1)
-        return page
+    def open_due_task(self):
+        item = self.due_table.item(self.due_table.currentRow(), 0)
+        if item:
+            self.switch_page(PAGE_CASE)
+            self.case_management_page.select_client(item.data(Qt.ItemDataRole.UserRole))
+            self.case_management_page.tabs.setCurrentIndex(CASE_TAB_MONITORING)
 
     def create_kpi_card(self, title: str, value: str, color_hex: str, bg_tint: str, subtext: str, click_handler=None) -> QWidget:
         class ClickableCard(QFrame):
@@ -499,7 +643,7 @@ class MainWindow(QMainWindow):
         return card
 
     def nav_to_high_risk_clients(self):
-        self.switch_page(1)
+        self.open_client_tab(CLIENT_TAB_LIST)
         self.filter_risk.setCurrentText("고위기")
         self.refresh_clients_table()
 
@@ -517,7 +661,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def create_pill_badge(text: str, bg_hex: str, text_hex: str) -> QWidget:
         container = QWidget()
-        container.setStyleSheet("background: transparent;")
+        container.setStyleSheet("background: #FFFFFF;")
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -565,6 +709,22 @@ class MainWindow(QMainWindow):
 
     def refresh_dashboard(self):
         stats = self.db.get_dashboard_stats()
+        today = QDate.currentDate().toString('yyyy-MM-dd')
+        cutoff = QDate.currentDate().addDays(7).toString('yyyy-MM-dd')
+        tasks = [t for t in self.db.list_monitoring_tasks(include_completed=False) if t['due_date'] <= cutoff]
+        tasks.sort(key=lambda t: (t['due_date'], t['id']))
+        self.due_table.setRowCount(len(tasks))
+        self.open_due_btn.setEnabled(False)
+        for row, task in enumerate(tasks):
+            status = '기한 지남' if task['due_date'] < today else ('오늘' if task['due_date'] == today else '예정')
+            for col, value in enumerate((task['due_date'], task['client_name'],
+                                        task['task_type'] + (' · ' + task['notes'] if task['notes'] else ''), status)):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.ItemDataRole.UserRole, task['client_id'])
+                item.setToolTip(value)
+                self.due_table.setItem(row, col, item)
+        self.due_hint.setText(f'기한이 지났거나 7일 이내 확인할 일정 {len(tasks)}건 · 더블 클릭으로 해당 대상자 열기'
+                             if tasks else '7일 이내 확인할 일정이 없습니다. 사례관리 → 모니터링 일정에서 다음 약속을 등록하세요.')
         recent_documents = self.db.list_document_registry()[:5]
         self.dash_documents_table.setRowCount(len(recent_documents))
         for row, document in enumerate(recent_documents):
@@ -582,7 +742,7 @@ class MainWindow(QMainWindow):
             self.case_due_btn.setText(f"확인이 늦어진 모니터링 {overdue}건 · 7일 이내 예정 {upcoming}건  →")
             self.case_due_btn.setProperty("attention", True)
         else:
-            self.case_due_btn.setText(f"7일 이내 모니터링 {upcoming}건 · 사례관리 작업판 열기  →")
+            self.case_due_btn.setText(f"7일 이내 모니터링 {upcoming}건 · 확인할 일정 보기  →")
             self.case_due_btn.setProperty("attention", False)
         self.case_due_btn.style().unpolish(self.case_due_btn)
         self.case_due_btn.style().polish(self.case_due_btn)
@@ -610,8 +770,9 @@ class MainWindow(QMainWindow):
             summary = result_text[:60].replace("\n", " ") + ("..." if len(result_text) > 60 else "")
             self.dash_table.setItem(idx, 4, QTableWidgetItem(summary))
 
-    # ================= [PAGE 1: 대상자 관리] =================
+    # ================= [PAGE_CLIENTS: 대상자 관리 · 업무 현황] =================
     def create_clients_page(self) -> QWidget:
+        """대상자 목록과 업무 현황 요약을 한 화면에 모은 시작 화면."""
         page = QWidget()
         page.setObjectName("pageRoot")
         layout = QVBoxLayout(page)
@@ -620,9 +781,88 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(make_page_header(
             "대상자 관리",
-            "사례 대상자를 찾고 위기도를 살핀 뒤 상담 이력으로 바로 이동합니다.",
+            "오늘 확인할 일과 대상자 현황을 한 화면에서 보고 바로 이어서 처리합니다.",
             "CLIENT REGISTRY",
         ))
+
+        layout.addLayout(self.build_kpi_row())
+        layout.addLayout(self.build_quick_action_bar())
+
+        self.case_due_btn = QPushButton("모니터링 일정을 확인하세요")
+        self.case_due_btn.setObjectName("caseDueButton")
+        self.case_due_btn.clicked.connect(lambda: self.client_tabs.setCurrentIndex(CLIENT_TAB_DUE))
+        layout.addWidget(self.case_due_btn)
+
+        self.client_tabs = QTabWidget()
+        self.client_tabs.setUsesScrollButtons(True)
+        self.client_tabs.addTab(self.build_client_list_tab(), "대상자 목록")
+        self.client_tabs.addTab(self.build_due_tab(), "확인할 일정")
+        self.client_tabs.addTab(self.build_recent_records_tab(), "최근 상담")
+        self.client_tabs.addTab(self.build_recent_documents_tab(), "최근 서류")
+        self.client_tabs.setCurrentIndex(CLIENT_TAB_LIST)
+        layout.addWidget(self.client_tabs, stretch=1)
+
+        return page
+
+    def build_kpi_row(self) -> QHBoxLayout:
+        """업무 현황 KPI 카드 네 장. 누르면 해당 목록으로 바로 이동한다."""
+        kpi_layout = QHBoxLayout()
+        kpi_layout.setSpacing(14)
+
+        self.kpi_clients = self.create_kpi_card(
+            "총 관리 대상자", "0명", "#176B5B", "#E3F0EC", "등록된 전체 사례 대상자",
+            lambda: self.open_client_tab(CLIENT_TAB_LIST))
+        self.kpi_high_risk = self.create_kpi_card(
+            "고위기 집중관리", "0명", "#B83A4B", "#FCEBED", "집중 모니터링 필요 대상",
+            self.nav_to_high_risk_clients)
+        self.kpi_monthly = self.create_kpi_card(
+            "이달의 상담 실적", "0건", "#237A64", "#E7F3EF", "이번 달 누적 상담 기록",
+            lambda: self.open_client_tab(CLIENT_TAB_RECENT))
+        self.kpi_docs = self.create_kpi_card(
+            "등록 서류", "0건", "#A76318", "#FFF1DC", "작성 서류·상담일지·첨부 파일",
+            self.open_document_vault)
+
+        for card in (self.kpi_clients, self.kpi_high_risk, self.kpi_monthly, self.kpi_docs):
+            kpi_layout.addWidget(card)
+        return kpi_layout
+
+    def build_quick_action_bar(self) -> QHBoxLayout:
+        """대상자 화면에서 가장 자주 누르는 다섯 가지 작업."""
+        action_layout = QHBoxLayout()
+        action_layout.setSpacing(8)
+        act_label = QLabel("⚡ 빠른 실행:")
+        act_label.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
+        act_label.setStyleSheet("color: #475569; padding-right: 4px;")
+        action_layout.addWidget(act_label)
+
+        btn_new_client = QPushButton("대상자 등록")
+        set_button_role(btn_new_client, "primary")
+        btn_new_client.clicked.connect(self.open_new_client_dialog)
+
+        btn_new_counsel = QPushButton("상담 작성")
+        set_button_role(btn_new_counsel, "soft")
+        btn_new_counsel.clicked.connect(self.open_counseling_writer)
+
+        btn_manual_counsel = QPushButton("직접 작성")
+        set_button_role(btn_manual_counsel, "soft")
+        btn_manual_counsel.clicked.connect(self.open_manual_counseling_dialog)
+
+        btn_new_doc = QPushButton("서류 첨부")
+        btn_new_doc.clicked.connect(self.open_new_document_dialog)
+
+        btn_typed_memo = QPushButton("메모 보관")
+        btn_typed_memo.clicked.connect(self.open_new_typed_memo_dialog)
+
+        for button in (btn_new_client, btn_new_counsel, btn_manual_counsel, btn_new_doc, btn_typed_memo):
+            action_layout.addWidget(button)
+        action_layout.addStretch()
+        return action_layout
+
+    def build_client_list_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(4, 10, 4, 4)
+        layout.setSpacing(10)
 
         # 검색 및 필터
         top_layout = QHBoxLayout()
@@ -631,6 +871,7 @@ class MainWindow(QMainWindow):
         self.client_search_input = QLineEdit()
         self.client_search_input.setPlaceholderText("🔍 성명, 가명, 연락처, 주소 검색...")
         self.client_search_input.setFixedWidth(220)
+        self.client_search_input.setClearButtonEnabled(True)
         self.client_search_input.textChanged.connect(self.refresh_clients_table)
         top_layout.addWidget(self.client_search_input)
 
@@ -645,45 +886,48 @@ class MainWindow(QMainWindow):
         self.filter_welfare.addItems(["전체", "기초수급", "차상위", "일반"])
         self.filter_welfare.currentTextChanged.connect(self.refresh_clients_table)
         top_layout.addWidget(self.filter_welfare)
+        top_layout.addStretch()
 
+        self.client_count_label = QLabel()
+        self.client_count_label.setObjectName('sectionHint')
+        top_layout.addWidget(self.client_count_label)
+
+        reset_clients = QPushButton('필터 초기화')
+        reset_clients.clicked.connect(self.reset_client_filters)
+        top_layout.addWidget(reset_clients)
         layout.addLayout(top_layout)
 
-        # 액션 버튼 행
+        # 선택한 대상자에게 적용하는 작업 행
         act_row = QHBoxLayout()
-        btn_add = QPushButton("➕ 신규 대상자 등록")
-        set_button_role(btn_add, "primary")
-        btn_add.clicked.connect(self.open_new_client_dialog)
+        act_caption = QLabel("선택한 대상자:")
+        act_caption.setObjectName('sectionHint')
+        act_row.addWidget(act_caption)
 
-        btn_detail = QPushButton("📋 상세 및 상담이력 보기")
+        btn_detail = QPushButton("상세·이력")
         set_button_role(btn_detail, "soft")
         btn_detail.clicked.connect(self.open_selected_client_detail)
 
-        btn_case = QPushButton("사례관리 열기")
-        set_button_role(btn_case, "primary")
+        btn_case = QPushButton("사례관리")
+        set_button_role(btn_case, "soft")
         btn_case.clicked.connect(self.open_case_for_selected_client)
 
-        btn_counsel = QPushButton("🚀 AI 상담 작성")
+        btn_counsel = QPushButton("상담 작성")
         set_button_role(btn_counsel, "primary")
         btn_counsel.clicked.connect(self.write_counsel_for_selected_client)
 
-        btn_manual = QPushButton("✍️ 수기 상담 작성")
+        btn_manual = QPushButton("직접 작성")
         set_button_role(btn_manual, "soft")
         btn_manual.clicked.connect(self.write_manual_for_selected_client)
 
-        btn_edit = QPushButton("✏️ 정보 수정")
+        btn_edit = QPushButton("정보 수정")
         btn_edit.clicked.connect(self.open_edit_client_dialog)
 
-        btn_del = QPushButton("🗑️ 삭제")
+        btn_del = QPushButton("삭제")
         set_button_role(btn_del, "danger")
         btn_del.clicked.connect(self.delete_selected_client)
 
-        act_row.addWidget(btn_add)
-        act_row.addWidget(btn_detail)
-        act_row.addWidget(btn_case)
-        act_row.addWidget(btn_counsel)
-        act_row.addWidget(btn_manual)
-        act_row.addWidget(btn_edit)
-        act_row.addWidget(btn_del)
+        for button in (btn_detail, btn_case, btn_counsel, btn_manual, btn_edit, btn_del):
+            act_row.addWidget(button)
         act_row.addStretch()
         layout.addLayout(act_row)
 
@@ -693,19 +937,95 @@ class MainWindow(QMainWindow):
         self.clients_table.setHorizontalHeaderLabels(["ID", "성명", "가명(비식별)", "성별/생년", "위기도", "수급자격", "연락처", "주소"])
         self.clients_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
         self.clients_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.clients_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.clients_table.verticalHeader().hide()
+        self.clients_table.setColumnHidden(0, True)
+        self.clients_table.setAlternatingRowColors(True)
+        self.client_selection_actions = [btn_detail, btn_case, btn_counsel, btn_manual, btn_edit, btn_del]
+        self.clients_table.itemSelectionChanged.connect(self.update_client_actions)
         self.clients_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.clients_table.cellDoubleClicked.connect(lambda r, c: self.open_selected_client_detail())
         layout.addWidget(self.clients_table, stretch=1)
 
-        return page
+        return tab
+
+    def build_due_tab(self) -> QWidget:
+        tab = QWidget()
+        due_layout = QVBoxLayout(tab)
+        due_layout.setContentsMargins(4, 10, 4, 4)
+        self.due_hint = QLabel('일정을 선택하고 대상자 작업판 열기를 누르세요.')
+        self.due_hint.setObjectName('sectionHint')
+        due_layout.addWidget(self.due_hint)
+        self.due_table = QTableWidget(0, 4)
+        self.due_table.setHorizontalHeaderLabels(['예정일', '대상자', '확인할 일', '상태'])
+        self.due_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.due_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.due_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.due_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.due_table.verticalHeader().hide()
+        self.due_table.cellDoubleClicked.connect(lambda *_: self.open_due_task())
+        due_layout.addWidget(self.due_table, 1)
+        self.open_due_btn = QPushButton('대상자 작업판 열기')
+        self.open_due_btn.clicked.connect(self.open_due_task)
+        self.open_due_btn.setEnabled(False)
+        self.due_table.itemSelectionChanged.connect(lambda: self.open_due_btn.setEnabled(bool(self.due_table.selectedItems())))
+        due_layout.addWidget(self.open_due_btn)
+        return tab
+
+    def build_recent_records_tab(self) -> QWidget:
+        recent_group = QGroupBox("최근 상담 및 개입 기록 (최근 5건 - 더블 클릭 시 상세 카드 열림)")
+        rg_layout = QVBoxLayout(recent_group)
+        rg_layout.setContentsMargins(12, 16, 12, 12)
+
+        self.dash_table = QTableWidget()
+        self.dash_table.setColumnCount(5)
+        self.dash_table.setHorizontalHeaderLabels(["대상자 성명", "가명(비식별)", "상담 일자", "서식/종류", "핵심 요약"])
+        self.dash_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.dash_table.verticalHeader().setDefaultSectionSize(40)
+        self.dash_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.dash_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.dash_table.cellDoubleClicked.connect(self.on_dash_record_double_clicked)
+        rg_layout.addWidget(self.dash_table)
+        return recent_group
+
+    def build_recent_documents_tab(self) -> QWidget:
+        documents_group = QGroupBox('최근 등록·수정 서류 (더블 클릭으로 열기)')
+        documents_layout = QVBoxLayout(documents_group)
+        self.dash_documents_table = QTableWidget(0, 4)
+        self.dash_documents_table.setHorizontalHeaderLabels(['대상자', '서류명', '구분', '등록·수정일'])
+        self.dash_documents_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dash_documents_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.dash_documents_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.dash_documents_table.cellDoubleClicked.connect(
+            lambda row, _col: self.open_registry_document(self.dash_documents_table.item(row, 0).data(Qt.ItemDataRole.UserRole)))
+        documents_layout.addWidget(self.dash_documents_table)
+        return documents_group
+
+    def reset_client_filters(self):
+        for widget in (self.client_search_input, self.filter_risk, self.filter_welfare):
+            widget.blockSignals(True)
+        self.client_search_input.clear()
+        self.filter_risk.setCurrentIndex(0)
+        self.filter_welfare.setCurrentIndex(0)
+        for widget in (self.client_search_input, self.filter_risk, self.filter_welfare):
+            widget.blockSignals(False)
+        self.refresh_clients_table()
+
+    def update_client_actions(self):
+        selected = bool(self.clients_table.selectedItems())
+        for button in self.client_selection_actions:
+            button.setEnabled(selected)
 
     def refresh_clients_table(self):
+        selected_id = self.get_selected_client_id()
         kw = self.client_search_input.text().strip()
         risk = self.filter_risk.currentText()
         welf = self.filter_welfare.currentText()
         clients = self.db.list_clients(keyword=kw, risk_filter=risk, welfare_filter=welf)
 
         self.clients_table.setSortingEnabled(False)
+        self.clients_table.clearSelection()
+        self.clients_table.setCurrentCell(-1, -1)
         self.clients_table.setRowCount(len(clients))
         self.clients_table.verticalHeader().setDefaultSectionSize(42)
         for idx, c in enumerate(clients):
@@ -737,6 +1057,12 @@ class MainWindow(QMainWindow):
             self.clients_table.setItem(idx, 6, QTableWidgetItem(c.get('phone', '')))
             self.clients_table.setItem(idx, 7, QTableWidgetItem(c.get('address', '')))
         self.clients_table.setSortingEnabled(True)
+        for row in range(self.clients_table.rowCount()):
+            if self.clients_table.item(row, 0).data(Qt.ItemDataRole.DisplayRole) == selected_id:
+                self.clients_table.selectRow(row)
+                break
+        self.client_count_label.setText(f'{len(clients)}명' if clients else '검색 결과 없음')
+        self.update_client_actions()
 
     def open_new_client_dialog(self):
         dlg = ClientDialog(self.db, parent=self)
@@ -782,11 +1108,14 @@ class MainWindow(QMainWindow):
         if not cid:
             QMessageBox.information(self, "대상자 선택", "사례관리를 열 대상자를 먼저 선택해 주세요.")
             return
-        self.switch_page(2)
+        self.switch_page(PAGE_CASE)
         self.case_management_page.select_client(cid)
 
     def delete_selected_client(self):
         cid = self.get_selected_client_id()
+        if self._generation_busy and cid == self.ai_client_combo.currentData():
+            self.status_bar.showMessage('이 대상자의 초안 작성을 마친 뒤 삭제하세요.', 4000)
+            return
         if not cid:
             QMessageBox.information(self, "알림", "삭제할 대상자를 먼저 선택해 주세요.")
             return
@@ -798,250 +1127,67 @@ class MainWindow(QMainWindow):
         )
         if reply == QMessageBox.StandardButton.Yes:
             self.db.delete_client(cid)
+            if self._draft_client == cid:
+                self._draft_ready = False
+                self._draft_timer.stop()
+                self.refresh_ai_client_combo()
+                self.restore_counseling_draft()
             self.refresh_clients_table()
             self.refresh_dashboard()
-    # ================= [PAGE 2: AI 상담일지 작성실] =================
-    def create_ai_counsel_page(self) -> QWidget:
+    # ================= [PAGE_DOCS: 서류작성 및 보관함] =================
+    def create_docs_page(self) -> QWidget:
+        """상담일지를 쓰는 곳과 완성된 서류를 찾는 곳을 한 메뉴 안의 두 탭으로 둔다."""
         page = QWidget()
         page.setObjectName("pageRoot")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(18, 18, 18, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(12, 10, 12, 0)
+        layout.setSpacing(0)
 
-        layout.addWidget(make_page_header(
-            "상담일지 작성",
-            "AI로 메모를 정리하거나 사회복지사가 상담 내용을 직접 작성해 이력에 저장합니다.",
-            "COUNSELING RECORD",
-        ))
-
-        writing_mode_bar = QFrame()
-        writing_mode_bar.setObjectName("writingModeBar")
-        mode_layout = QHBoxLayout(writing_mode_bar)
-        mode_layout.setContentsMargins(12, 8, 12, 8)
-        mode_layout.setSpacing(8)
-        mode_layout.addWidget(QLabel("작성 방식"))
-
-        ai_mode_btn = QPushButton("AI로 메모 정리")
-        ai_mode_btn.setObjectName("activeWritingMode")
-        ai_mode_btn.clicked.connect(lambda: self.input_text.setFocus())
-        direct_mode_btn = QPushButton("직접 작성·저장")
-        set_button_role(direct_mode_btn, "soft")
-        direct_mode_btn.clicked.connect(self.open_manual_from_counsel_page)
-        report_btn = QPushButton("상담일지 조회·출력")
-        report_btn.clicked.connect(self.open_counseling_report)
-        mode_layout.addWidget(ai_mode_btn)
-        mode_layout.addWidget(direct_mode_btn)
-        mode_layout.addWidget(report_btn)
-        mode_hint = QLabel("직접 작성은 AI 모델 없이 바로 사용할 수 있습니다.")
-        mode_hint.setObjectName("writingModeHint")
-        mode_layout.addWidget(mode_hint, stretch=1)
-        layout.addWidget(writing_mode_bar)
-
-        # 대상자 연동 상단 카드
-        client_link_box = QFrame()
-        client_link_box.setStyleSheet("""
-            QFrame {
-                background-color: #FFFFFF;
-                border: 1px solid #E2E8F0;
-                border-radius: 12px;
-                padding: 6px 12px;
-            }
-        """)
-        cl_layout = QHBoxLayout(client_link_box)
-        cl_layout.setContentsMargins(8, 6, 8, 6)
-        cl_layout.setSpacing(10)
-
-        cl_title = QLabel("👤 상담 대상자 연동:")
-        cl_title.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        cl_title.setStyleSheet("color: #334155;")
-        cl_layout.addWidget(cl_title)
-
-        self.ai_client_combo = QComboBox()
-        self.ai_client_combo.setMinimumWidth(320)
-        self.ai_client_combo.currentIndexChanged.connect(self.on_ai_client_selected)
-        cl_layout.addWidget(self.ai_client_combo)
-
-        self.client_info_badge = QLabel("대상자를 선택하면 가명이 자동 적용되며 상담 이력에 즉시 누적 저장됩니다.")
-        self.client_info_badge.setStyleSheet("color: #145A4D; background-color: #E3F0EC; font-size: 11px; font-weight: 700; padding: 4px 12px; border-radius: 8px;")
-        cl_layout.addWidget(self.client_info_badge)
-        cl_layout.addStretch()
-        layout.addWidget(client_link_box)
-
-        session_row = QHBoxLayout()
-        self.session_date_input = QDateEdit(QDate.currentDate())
-        self.session_date_input.setCalendarPopup(True)
-        self.session_date_input.setDisplayFormat('yyyy-MM-dd')
-        self.session_method_input = QComboBox()
-        self.session_method_input.addItems(['', '방문', '복지관 내방', '전화', '온라인', '기타'])
-        session_row.addWidget(QLabel('실제 상담일'))
-        session_row.addWidget(self.session_date_input)
-        session_row.addWidget(QLabel('상담방법'))
-        session_row.addWidget(self.session_method_input)
-        session_row.addStretch()
-        layout.addLayout(session_row)
-
-        # 좌우 분할 스플리터
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(8)
-
-        # 좌측 입력 패널
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-        left_layout.setContentsMargins(0, 0, 8, 0)
-        left_layout.setSpacing(10)
-
-        # 서식 선택
-        opt_group = QGroupBox("1. 상담 서식 및 옵션")
-        opt_layout = QVBoxLayout(opt_group)
-
-        tmpl_h_layout = QHBoxLayout()
-        tmpl_label = QLabel("상담 서식:")
-        tmpl_label.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        self.tmpl_combo = QComboBox()
-        self.tmpl_combo.currentIndexChanged.connect(self.on_template_changed)
-        tmpl_h_layout.addWidget(tmpl_label)
-        tmpl_h_layout.addWidget(self.tmpl_combo, stretch=1)
-        manage_template_btn = QPushButton("내 양식 편집")
-        manage_template_btn.clicked.connect(lambda: self.switch_page(5))
-        tmpl_h_layout.addWidget(manage_template_btn)
-        opt_layout.addLayout(tmpl_h_layout)
-
-        self.tmpl_desc_label = QLabel("")
-        self.tmpl_desc_label.setStyleSheet("color: #64748B; font-size: 11px; padding: 2px 0;")
-        self.tmpl_desc_label.setWordWrap(True)
-        opt_layout.addWidget(self.tmpl_desc_label)
-
-        detail_h_layout = QHBoxLayout()
-        detail_label = QLabel("상세도:")
-        self.detail_combo = QComboBox()
-        self.detail_combo.addItems(["표준", "간결하게", "상세하게"])
-        self.detail_combo.setCurrentText("표준")
-        detail_h_layout.addWidget(detail_label)
-        detail_h_layout.addWidget(self.detail_combo)
-
-        detail_h_layout.addSpacing(15)
-        name_label = QLabel("대상자 성명:")
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("예: 홍길동 (가명 변환용)")
-        self.name_input.setMaximumWidth(150)
-        detail_h_layout.addWidget(name_label)
-        detail_h_layout.addWidget(self.name_input)
-        detail_h_layout.addStretch()
-        opt_layout.addLayout(detail_h_layout)
-
-        self.mask_checkbox = QCheckBox("개인정보 자동 마스킹 적용 (주민번호, 전화번호, 상세주소 비식별화)")
-        self.mask_checkbox.setChecked(True)
-        self.mask_checkbox.setStyleSheet("color: #176B5B; font-weight: 700; margin-top: 4px;")
-        opt_layout.addWidget(self.mask_checkbox)
-        left_layout.addWidget(opt_group)
-
-        # 거친 상담 메모 입력 영역
-        memo_group = QGroupBox("2. 거친 상담 메모 / 핵심 키워드 입력")
-        memo_layout = QVBoxLayout(memo_group)
-
-        sample_btn_layout = QHBoxLayout()
-        memo_hint = QLabel("면담 중 기록한 단어, 문장, 녹취 요약을 자유롭게 적어주세요:")
-        memo_hint.setStyleSheet("color: #64748B; font-size: 11px;")
-        self.sample_btn = QPushButton("💡 예시 메모 불러오기")
-        self.sample_btn.clicked.connect(self.load_sample_memo)
-        sample_btn_layout.addWidget(memo_hint)
-        sample_btn_layout.addStretch()
-        sample_btn_layout.addWidget(self.sample_btn)
-        memo_layout.addLayout(sample_btn_layout)
-
-        self.input_text = QTextEdit()
-        self.input_text.setPlaceholderText("여기에 상담 메모를 입력하세요...\n(예: 김OO 어르신 허리 통증으로 식사 해결 곤란, 밑반찬 지원 요청, 다음 주 방문 예정)")
-        self.input_text.setFont(QFont("Malgun Gothic", 10))
-        memo_layout.addWidget(self.input_text)
-
-        # 실행 및 중단 버튼
-        btn_layout = QHBoxLayout()
-        self.generate_btn = QPushButton("✨ AI 상담일지 작성 (Ctrl+Enter)")
-        self.generate_btn.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
-        set_button_role(self.generate_btn, "primary")
-        self.generate_btn.setMinimumHeight(44)
-        self.generate_btn.clicked.connect(self.start_generation)
-
-        self.stop_btn = QPushButton("🛑 중단 (Esc)")
-        self.stop_btn.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        set_button_role(self.stop_btn, "danger")
-        self.stop_btn.setMinimumHeight(44)
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.stop_generation)
-
-        btn_layout.addWidget(self.generate_btn, stretch=3)
-        btn_layout.addWidget(self.stop_btn, stretch=1)
-        memo_layout.addLayout(btn_layout)
-
-        left_layout.addWidget(memo_group, stretch=1)
-        splitter.addWidget(left_widget)
-
-        # 우측 결과 패널
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-        right_layout.setContentsMargins(8, 0, 0, 0)
-        right_layout.setSpacing(10)
-
-        result_group = QGroupBox("3. 정형화된 상담일지 결과")
-        res_layout = QVBoxLayout(result_group)
-
-        tool_layout = QHBoxLayout()
-        self.mask_stat_label = QLabel("")
-        self.mask_stat_label.setStyleSheet("color: #176B5B; font-size: 11px; font-weight: bold;")
-        tool_layout.addWidget(self.mask_stat_label)
-        tool_layout.addStretch()
-
-        self.stop_output_btn = QPushButton("🛑 중단")
-        self.stop_output_btn.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        set_button_role(self.stop_output_btn, "danger")
-        self.stop_output_btn.setEnabled(False)
-        self.stop_output_btn.clicked.connect(self.stop_generation)
-
-        # SaaS 전용: 대상자 히스토리 저장 버튼
-        self.save_to_db_btn = QPushButton("💾 DB 이력에 저장")
-        self.save_to_db_btn.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        set_button_role(self.save_to_db_btn, "primary")
-        self.save_to_db_btn.clicked.connect(self.save_record_to_database)
-
-        self.apply_form_btn = QPushButton("▦ 표 양식 적용")
-        self.apply_form_btn.clicked.connect(self.apply_selected_form_to_output)
-
-        self.copy_btn = QPushButton("📋 원클릭 복사")
-        self.copy_btn.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-        set_button_role(self.copy_btn, "soft")
-        self.copy_btn.clicked.connect(self.copy_to_clipboard)
-
-        self.save_file_btn = QPushButton("📄 파일 저장")
-        self.save_file_btn.clicked.connect(self.save_to_file)
-
-        self.clear_btn = QPushButton("🧹 지우기")
-        self.clear_btn.clicked.connect(self.clear_fields)
-
-        tool_layout.addWidget(self.stop_output_btn)
-        tool_layout.addWidget(self.save_to_db_btn)
-        tool_layout.addWidget(self.apply_form_btn)
-        tool_layout.addWidget(self.copy_btn)
-        tool_layout.addWidget(self.save_file_btn)
-        tool_layout.addWidget(self.clear_btn)
-        res_layout.addLayout(tool_layout)
-
-        self.output_text = QTextEdit()
-        self.output_text.setReadOnly(False)
-        self.output_text.setFont(QFont("Malgun Gothic", 10))
-        self.output_text.setPlaceholderText("AI가 작성한 표준 양식 상담일지가 실시간으로 여기에 출력됩니다.\n출력 후 자유롭게 추가 편집 및 보완이 가능합니다.")
-        res_layout.addWidget(self.output_text)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        res_layout.addWidget(self.progress_bar)
-
-        right_layout.addWidget(result_group)
-        splitter.addWidget(right_widget)
-
-        splitter.setSizes([540, 560])
-        layout.addWidget(splitter, stretch=1)
-        self.refresh_template_combo()
+        self.docs_tabs = QTabWidget()
+        self.docs_tabs.setUsesScrollButtons(True)
+        self.docs_tabs.addTab(self.wrap_in_scroll(self.build_counseling_workspace()), "상담일지 작성")
+        self.docs_tabs.addTab(self.wrap_in_scroll(self.create_documents_page()), "서류 보관함")
+        self.docs_tabs.setCurrentIndex(DOCS_TAB_WRITE)
+        self.docs_tabs.currentChanged.connect(self.on_docs_tab_changed)
+        layout.addWidget(self.docs_tabs)
         return page
+
+    def on_docs_tab_changed(self, index: int):
+        """탭을 옮길 때마다 대상자 목록과 서류 목록을 최신 상태로 맞춘다."""
+        if index == DOCS_TAB_WRITE:
+            self.refresh_ai_client_combo()
+        else:
+            self.populate_doc_client_filter()
+            self.refresh_documents_table()
+
+    # ================= [PAGE_DATA: 데이터 관리] =================
+    def create_data_page(self) -> QWidget:
+        """서류 양식 편집과 데이터 백업·복원을 한 메뉴 안의 두 탭으로 둔다."""
+        page = QWidget()
+        page.setObjectName("pageRoot")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 0)
+        layout.setSpacing(0)
+
+        self.data_tabs = QTabWidget()
+        self.data_tabs.setUsesScrollButtons(True)
+        self.data_tabs.addTab(self.wrap_in_scroll(self.template_manager_page), "서류 양식")
+        self.data_tabs.addTab(self.create_settings_page(), "데이터 백업·복원")
+        self.data_tabs.setCurrentIndex(DATA_TAB_FORMS)
+        layout.addWidget(self.data_tabs)
+        return page
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'writing_splitter'):
+            orientation = Qt.Orientation.Vertical if self.width() < 1180 else Qt.Orientation.Horizontal
+            if self.writing_splitter.orientation() != orientation:
+                self.writing_splitter.setOrientation(orientation)
+
+    def focus_client_search(self):
+        self.open_client_tab(CLIENT_TAB_LIST)
+        self.client_search_input.setFocus()
+        self.client_search_input.selectAll()
 
     def refresh_ai_client_combo(self):
         current_data = self.ai_client_combo.currentData()
@@ -1061,23 +1207,26 @@ class MainWindow(QMainWindow):
         self.ai_client_combo.blockSignals(False)
 
     def on_ai_client_selected(self):
-        cid = self.ai_client_combo.currentData()
-        if cid:
-            c = self.db.get_client(cid)
-            if c:
-                self.name_input.setText(c.get("name", ""))
-                self.client_info_badge.setText(f"선택됨: {c.get('name')} | {c.get('risk_level')} | {c.get('welfare_type')} (상담 완료 후 DB 자동 저장 가능)")
-        else:
-            self.client_info_badge.setText("대상자를 선택하면 본문에 가명이 자동 적용되며, 상담 이력에 영구 누적 저장됩니다.")
+        if self._draft_ready and not self.persist_counseling_draft():
+            self.ai_client_combo.blockSignals(True)
+            self.ai_client_combo.setCurrentIndex(self.ai_client_combo.findData(self._draft_client))
+            self.ai_client_combo.blockSignals(False)
+            return
+        self.restore_counseling_draft()
 
     def switch_to_ai_counsel_with_client(self, client_id: int):
-        self.switch_page(3) # AI 페이지로 전환
+        if self._generation_busy:
+            self.status_bar.showMessage('AI 초안 작성을 마친 뒤 대상자를 변경하세요.', 4000)
+            return
+        self.open_counseling_writer()
         for idx in range(self.ai_client_combo.count()):
             if self.ai_client_combo.itemData(idx) == client_id:
                 self.ai_client_combo.setCurrentIndex(idx)
                 break
 
     def save_record_to_database(self):
+        if self._generation_busy or self.counseling_state() == self._saved_state:
+            return
         result_text = self.output_text.toPlainText().strip()
         if not result_text:
             QMessageBox.warning(self, "확인", "저장할 상담일지 결과가 없습니다.")
@@ -1103,19 +1252,29 @@ class MainWindow(QMainWindow):
             "worker_name": self.current_profile["name"]
         }
 
-        rec_id = self.db.add_counseling_record(data)
-        if cid:
-            c = self.db.get_client(cid)
-            cname = c.get('name', '') if c else '대상자'
-            self.status_bar.showMessage(f"✅ '{cname}' 대상자의 누적 상담 이력에 성공적으로 저장되었습니다 (ID: {rec_id})", 5000)
-            QMessageBox.information(self, "저장 완료", f"'{cname}' 대상자의 상담 이력에 성공적으로 저장되었습니다!\n대상자 관리 화면에서 언제든 과거 상담을 열람할 수 있습니다.")
-        else:
-            self.status_bar.showMessage(f"✅ 일반 상담 기록으로 데이터베이스에 저장되었습니다 (ID: {rec_id})", 4000)
-            QMessageBox.information(self, "저장 완료", "일반 상담 기록으로 데이터베이스에 안전하게 저장되었습니다.")
+        data['session_method'] = self.session_method_input.currentText()
+        if self._record_id and self._saved_state:
+            data['_expected'] = {
+                'ai_result': self._saved_state['text'].strip(),
+                'session_date': self._saved_state['date'],
+                'session_method': self._saved_state['method'],
+                'raw_memo': self._saved_state['memo'].strip(),
+            }
+        try:
+            if self._record_id:
+                self.db.update_counseling_record(self._record_id, data)
+            else:
+                self._record_id = self.db.add_counseling_record(data)
+        except Exception as exc:
+            QMessageBox.warning(self, '상담 저장 실패', f'내용은 작성 화면에 남아 있습니다.\n{exc}')
+            return
+        self._saved_state = self.counseling_state()
+        self.persist_counseling_draft()
+        self.update_counseling_actions()
+        self.status_bar.showMessage('상담 이력에 저장했습니다. 다음 상담은 새 상담 시작을 눌러 주세요.', 5000)
 
         self.refresh_dashboard()
 
-    # ================= [PAGE 3: 서류/문서 보관함] =================
     def create_documents_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("pageRoot")
@@ -1131,33 +1290,36 @@ class MainWindow(QMainWindow):
 
         top_layout = QHBoxLayout()
 
-        btn_add_doc = QPushButton("➕ 새 서류 첨부 등록")
+        btn_add_doc = QPushButton("➕ 서류 첨부")
         set_button_role(btn_add_doc, "primary")
+        btn_add_doc.setToolTip("HWP·PDF·이미지 등 원본 서류 파일을 대상자에게 첨부합니다.")
         btn_add_doc.clicked.connect(self.open_new_document_dialog)
 
-        btn_type_doc = QPushButton("✍️ 직접 타이핑 메모/서류 작성")
+        btn_type_doc = QPushButton("✍️ 직접 작성")
         set_button_role(btn_type_doc, "soft")
+        btn_type_doc.setToolTip("메모나 서류를 이 프로그램에서 직접 타이핑해 보관합니다.")
         btn_type_doc.clicked.connect(self.open_new_typed_memo_dialog)
 
-        btn_open_doc = QPushButton("🔍 선택 서류 열기 (HWP/PDF/TXT)")
+        btn_open_doc = QPushButton("열기")
+        btn_open_doc.setToolTip("선택한 서류를 엽니다. (HWP/PDF/TXT)")
         btn_open_doc.clicked.connect(self.open_selected_document)
-        btn_edit_doc = QPushButton('선택 서류 수정')
+
+        btn_edit_doc = QPushButton("수정")
+        btn_edit_doc.setToolTip("선택한 서류의 제목·구분·내용을 고칩니다.")
         btn_edit_doc.clicked.connect(self.edit_selected_document)
 
-        btn_del_doc = QPushButton("🗑️ 서류 삭제")
+        btn_del_doc = QPushButton("삭제")
         set_button_role(btn_del_doc, "danger")
         btn_del_doc.clicked.connect(self.delete_selected_document)
 
-        btn_backup_docs = QPushButton("📦 서류 일괄 백업 (.zip)")
+        btn_backup_docs = QPushButton("📦 일괄 백업")
         set_button_role(btn_backup_docs, "soft")
+        btn_backup_docs.setToolTip("현재 대상자 필터에 맞춰 첨부 서류를 ZIP으로 내보냅니다.")
         btn_backup_docs.clicked.connect(self.export_documents_only_backup)
 
-        top_layout.addWidget(btn_add_doc)
-        top_layout.addWidget(btn_type_doc)
-        top_layout.addWidget(btn_open_doc)
-        top_layout.addWidget(btn_edit_doc)
-        top_layout.addWidget(btn_del_doc)
-        top_layout.addWidget(btn_backup_docs)
+        for button in (btn_add_doc, btn_type_doc, btn_open_doc, btn_edit_doc, btn_del_doc, btn_backup_docs):
+            top_layout.addWidget(button)
+        top_layout.addStretch()
         layout.addLayout(top_layout)
 
         # 🔍 서류 검색 및 다중 필터 영역 (대상자별, 서류구분별, 제목/내용 검색)
@@ -1199,6 +1361,7 @@ class MainWindow(QMainWindow):
         f_search_label = QLabel("🔍 검색:")
         f_search_label.setStyleSheet("font-weight: bold; color: #334155; font-size: 11px;")
         self.doc_search_input = QLineEdit()
+        self.doc_search_input.setClearButtonEnabled(True)
         self.doc_search_input.setPlaceholderText("서류 제목 또는 비고 메모 검색...")
         self.doc_search_input.textChanged.connect(self.on_doc_filter_changed)
 
@@ -1234,9 +1397,16 @@ class MainWindow(QMainWindow):
         self.docs_table.setHorizontalHeaderLabels(["ID", "서류 제목", "구분", "대상자(가명)", "등록·수정일시", "크기/상태"])
         self.docs_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.docs_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.docs_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.docs_table.verticalHeader().hide()
+        self.docs_table.setColumnHidden(0, True)
+        self.docs_table.setAlternatingRowColors(True)
         self.docs_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.docs_table.cellDoubleClicked.connect(lambda r, c: self.open_selected_document())
         layout.addWidget(self.docs_table, stretch=1)
+        self.document_count_label = QLabel()
+        self.document_count_label.setObjectName('sectionHint')
+        layout.addWidget(self.document_count_label)
 
         self.populate_doc_client_filter()
         return page
@@ -1251,7 +1421,7 @@ class MainWindow(QMainWindow):
         self.doc_filter_client.addItem("[ 👤 미지정 (기관 일반 서류) ]", -1)
 
         clients = self.db.list_clients()
-        sel_idx = 0
+        sel_idx = 1 if current_data == -1 else 0
         for idx, c in enumerate(clients, start=2):
             self.doc_filter_client.addItem(f"{c['name']} ({c['masked_name']})", c['id'])
             if current_data and c['id'] == current_data:
@@ -1280,7 +1450,11 @@ class MainWindow(QMainWindow):
         keyword = self.doc_search_input.text().strip()
 
         docs = self.db.list_document_registry(client_id=client_id, doc_type=doc_type, keyword=keyword)
+        selected = self.docs_table.item(self.docs_table.currentRow(), 0)
+        previous = selected.data(Qt.ItemDataRole.UserRole) if selected else None
         self.docs_table.setSortingEnabled(False)
+        self.docs_table.clearSelection()
+        self.docs_table.setCurrentCell(-1, -1)
         self.docs_table.setRowCount(len(docs))
         self.docs_table.verticalHeader().setDefaultSectionSize(40)
         for idx, d in enumerate(docs):
@@ -1305,6 +1479,14 @@ class MainWindow(QMainWindow):
             kb = round(d.get('file_size', 0) / 1024, 1)
             self.docs_table.setItem(idx, 5, QTableWidgetItem(f"{kb} KB" if d['source_type'] == 'attachment' else d['status']))
         self.docs_table.setSortingEnabled(True)
+        if previous:
+            for row in range(self.docs_table.rowCount()):
+                current = self.docs_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                if (current['source_type'], current['id']) == (previous['source_type'], previous['id']):
+                    self.docs_table.selectRow(row)
+                    break
+        self.document_count_label.setText(f'서류 {len(docs)}건 · 더블 클릭으로 열기' if docs else
+                                          '조건에 맞는 서류가 없습니다. 필터를 초기화하거나 새 서류를 등록하세요.')
 
     def open_new_document_dialog(self):
         dlg = DocumentAddDialog(self.db, parent=self)
@@ -1476,7 +1658,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(16)
 
         layout.addWidget(make_page_header(
-            "데이터 관리",
+            "데이터 백업·복원",
             "저장 위치를 확인하고 전체 기록을 정기적으로 백업하거나 복원합니다.",
             "STORAGE & RECOVERY",
         ))
@@ -1637,17 +1819,24 @@ class MainWindow(QMainWindow):
         open_system_file(base_path)
 
     def change_data_directory(self):
+        if self._generation_busy or not self.persist_counseling_draft():
+            self.status_bar.showMessage('진행 중인 작성을 마치고 저장 위치를 변경하세요.', 4000)
+            return
+        if not self.template_manager_page.may_leave():
+            return
         dlg = StorageSetupDialog(self, is_change_mode=True)
         if dlg.exec():
             new_dir = config.get_data_dir()
             self.context_controller.stop()
             self.db = Database(data_dir=new_dir)
-            self.context_controller.timer.start()
+            self.context_controller.resume()
             self.db_dir_label.setText(self.db.data_dir)
             self.refresh_all_data()
             QMessageBox.information(self, "완료", f"데이터 저장 위치가 성공적으로 변경되었습니다:\n{new_dir}")
 
     def export_full_zip_backup(self):
+        if not self.persist_counseling_draft():
+            return
         default_name = f"복지상담_전체백업_{datetime.now().strftime('%Y%m%d_%H%M')}.zip"
         save_path, _ = QFileDialog.getSaveFileName(self, "백업 파일 저장", default_name, "백업 파일 (*.zip)")
         if save_path:
@@ -1706,6 +1895,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "백업 실패", f"서류 백업 중 오류 발생:\n{msg}")
 
     def import_full_zip_restore(self):
+        if self._generation_busy or not self.persist_counseling_draft():
+            self.status_bar.showMessage('진행 중인 작성을 마친 뒤 복원하세요.', 4000)
+            return
+        if not self.template_manager_page.may_leave():
+            return
         import_path, _ = QFileDialog.getOpenFileName(self, "복원할 백업 파일 선택", "", "백업 파일 (*.zip)")
         if import_path:
             reply = QMessageBox.warning(
@@ -1719,10 +1913,11 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self.context_controller.stop()
                 ok, msg, meta = Database.restore_from_backup_zip(import_path, self.db.data_dir)
-                self.context_controller.timer.start()
                 if ok:
                     self.db = Database(data_dir=self.db.data_dir)
                     self.refresh_all_data()
+                    # 복원한 저장 위치를 연 뒤에 감시를 다시 시작해야 밀린 건을 제대로 셈한다.
+                    self.context_controller.resume()
                     if meta.get("is_documents_only"):
                         docs_cnt = meta.get("total_docs", 0)
                         QMessageBox.information(
@@ -1740,6 +1935,7 @@ class MainWindow(QMainWindow):
                             f"백업 일시: {meta.get('backup_date', '기록 없음')}"
                         )
                 else:
+                    self.context_controller.resume()
                     QMessageBox.critical(self, "복원 실패", msg)
 
     def export_single_db_backup(self):
@@ -1756,6 +1952,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "백업 실패", f"DB 파일 백업 중 오류 발생:\n{str(e)}")
 
     def import_single_db_restore(self):
+        if self._generation_busy or not self.persist_counseling_draft():
+            self.status_bar.showMessage('진행 중인 작성을 마친 뒤 복원하세요.', 4000)
+            return
+        if not self.template_manager_page.may_leave():
+            return
         import_path, _ = QFileDialog.getOpenFileName(self, "복원할 DB 파일 선택", "", "SQLite DB (*.db)")
         if import_path:
             reply = QMessageBox.warning(
@@ -1775,7 +1976,7 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.critical(self, "복원 실패", f"DB 복원 중 오류 발생:\n{str(e)}")
                 finally:
-                    self.context_controller.timer.start()
+                    self.context_controller.resume()
 
     def refresh_all_data(self):
         # 저장 위치 변경·백업 복원 뒤에도 각 화면이 새 DB와 현재 사용자 정보를 바라보게 합니다.
@@ -1785,7 +1986,7 @@ class MainWindow(QMainWindow):
             self.refresh_profile_combo()
         if hasattr(self, "template_manager_page"):
             self.template_manager_page.db = self.db
-            self.template_manager_page.storage_label.setText(f"로컬 저장: {self.db.db_path}")
+            self.template_manager_page.set_storage_path(self.db.db_path)
             self.template_manager_page.set_profile(self.current_profile["id"])
         self.refresh_dashboard()
         self.refresh_clients_table()
@@ -1795,6 +1996,7 @@ class MainWindow(QMainWindow):
         self.refresh_template_combo()
         self.populate_doc_client_filter()
         self.refresh_documents_table()
+        self.restore_counseling_draft()
 
     # ================= [AI 상담일지 생성 로직] =================
     def apply_styling(self):
@@ -1803,7 +2005,8 @@ class MainWindow(QMainWindow):
     def update_system_status(self):
         info = InferenceEngine.get_system_memory_info()
         cores = self.engine.n_threads
-        self.status_sys_label.setText(
+        self.status_sys_label.setText(f"현재 사용자: {self.current_profile['name']}")
+        self.status_sys_label.setToolTip(
             f"RAM: {info['used_gb']}GB / {info['total_gb']}GB ({info['percent']}%) | CPU 물리코어: {cores}개"
         )
 
@@ -1815,7 +2018,7 @@ class MainWindow(QMainWindow):
         templates = self.db.list_form_templates(self.current_profile["id"])
         self.tmpl_combo.blockSignals(True)
         self.tmpl_combo.clear()
-        selected_index = 0
+        selected_index = next((i for i, t in enumerate(templates) if t.get('source_key') == '상담일지 (사례관리양식)'), 0)
         for index, template in enumerate(templates):
             self.tmpl_combo.addItem(template["name"], template["id"])
             if previous_id and template["id"] == previous_id:
@@ -1835,7 +2038,8 @@ class MainWindow(QMainWindow):
         template = self.get_selected_form_template()
         if template:
             self.tmpl_desc_label.setText(
-                f"[{template.get('category', '상담기록')}] {template.get('description', '')}"
+                '확인한 사실과 담당자의 판단을 구분해서 적어 주세요.' if template.get('source_key')
+                else template.get('description', '')
             )
         else:
             self.tmpl_desc_label.setText("사용할 서류 양식을 먼저 만들어 주세요.")
@@ -1847,12 +2051,18 @@ class MainWindow(QMainWindow):
             if not sample:
                 QMessageBox.information(self, "예시 메모", "이 양식에는 저장된 예시 메모가 없습니다.")
                 return
-            self.input_text.setText(sample)
+            if self.input_text.toPlainText().strip() and not self.confirm_replace('현재 메모를 예시 메모로 바꿀까요?'):
+                return
+            self.input_text.setPlainText(sample)
             if not self.name_input.text():
                 self.name_input.setText("김OO")
 
+    def model_ready(self) -> bool:
+        """내려받은 모델이 실제로 쓸 수 있는 상태인지 판단하는 단일 기준."""
+        return is_model_downloaded()
+
     def check_and_load_model(self):
-        if is_model_downloaded():
+        if self.model_ready():
             self.status_model_label.setText("모델: Gemma-2-2B (준비 완료)")
             self.generate_btn.setEnabled(True)
         else:
@@ -1860,13 +2070,25 @@ class MainWindow(QMainWindow):
             self.generate_btn.setEnabled(False)
 
     def start_generation(self):
+        if self._generation_busy or any(w and w.isRunning() for w in (self.worker, self.model_load_worker)):
+            return
+        if not self.model_ready():
+            self.set_generation_phase('AI 모델이 없어 초안을 만들 수 없습니다. 오른쪽 칸에 직접 작성해 저장할 수 있습니다.')
+            self.status_bar.showMessage('AI 모델을 설치한 뒤 사용하세요. 직접 작성은 바로 가능합니다.', 5000)
+            return
         if self.context_controller.busy():
+            self.set_generation_phase('다른 대상자의 맥락을 갱신하는 중입니다. 왼쪽 아래 AI 작업 상태가 끝나면 다시 눌러 주세요.')
             self.status_bar.showMessage("대상자 맥락을 갱신 중입니다. 완료 후 상담일지를 생성해 주세요.", 5000)
             return
         raw_text = self.input_text.toPlainText().strip()
         if not raw_text:
+            self.set_generation_phase()
             QMessageBox.warning(self, "입력 확인", "상담 메모를 먼저 입력해 주세요.")
             return
+
+        if self.output_text.toPlainText().strip() and not self.confirm_replace('현재 결과를 새 AI 초안으로 바꿀까요? 직접 수정한 내용도 바뀝니다.'):
+            return
+        self._generation_cancelled = False
 
         # 1. 개인정보 마스킹
         client_name = self.name_input.text().strip()
@@ -1878,7 +2100,7 @@ class MainWindow(QMainWindow):
                 summary = ", ".join([f"{k} {v}건" for k, v in stats.items() if v > 0])
                 self.mask_stat_label.setText(f"🛡️ 개인정보 비식별화 완료 ({summary})")
             else:
-                self.mask_stat_label.setText("🛡️ 감지된 민감정보 없음 (안전)")
+                self.mask_stat_label.setText("🛡️ 감지된 개인정보 패턴 없음 · 본문을 직접 확인하세요")
         else:
             self.mask_stat_label.setText("⚠️ 마스킹 해제됨 (원본 유지)")
 
@@ -1901,10 +2123,14 @@ class MainWindow(QMainWindow):
             if self.model_load_worker and self.model_load_worker.isRunning():
                 self.status_bar.showMessage("로컬 AI 모델을 불러오는 중입니다.", 3000)
                 return
+            self.set_counseling_busy(True)
+            self.set_generation_phase('AI 모델을 메모리에 불러오는 중입니다. 최초 실행은 20초 이상 걸릴 수 있습니다.')
             self.pending_prompt = prompt
             self.generate_btn.setEnabled(False)
             self.status_model_label.setText("모델: 메모리에 불러오는 중…")
             self.status_speed_label.setText("첫 실행 준비 중")
+            self.ai_started_at = time.monotonic()
+            self.refresh_activity_indicator()
             self.model_load_worker = ModelLoadWorker(self.engine)
             self.model_load_worker.finished_signal.connect(self.on_model_loaded)
             self.model_load_worker.start()
@@ -1917,8 +2143,11 @@ class MainWindow(QMainWindow):
         if not success:
             self.pending_prompt = None
             self.generate_btn.setEnabled(True)
+            self.set_counseling_busy(False)
             self.status_model_label.setText("모델: 로드 실패")
             self.status_speed_label.setText("준비 실패")
+            self.set_generation_phase(f'AI 모델을 불러오지 못했습니다: {message}')
+            self.refresh_activity_indicator()
             QMessageBox.critical(self, "모델 로드 실패", message)
             return
 
@@ -1935,12 +2164,16 @@ class MainWindow(QMainWindow):
         """준비된 프롬프트의 스트리밍 생성을 시작합니다."""
 
         # UI 상태
+        self.set_counseling_busy(True)
         self.output_text.clear()
         self.last_generated_raw_text = ""
         self.generate_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.stop_output_btn.setEnabled(True)
         self.status_speed_label.setText("생성 시작 중...")
+        self.ai_started_at = time.monotonic()
+        self.set_generation_phase('AI가 초안을 작성하는 중입니다. 결과가 아래 칸에 실시간으로 나타납니다.')
+        self.refresh_activity_indicator()
 
         # 스트리밍 스레드 실행
         self.worker = GenerationWorker(self.engine, prompt)
@@ -1958,40 +2191,42 @@ class MainWindow(QMainWindow):
 
     def on_metrics_updated(self, tps: float, total_tokens: int):
         self.status_speed_label.setText(f"속도: {tps:.1f} 토큰/초 | 총 {total_tokens} 토큰")
+        self.set_generation_phase(
+            f'AI가 초안을 작성하는 중입니다 · {total_tokens}토큰 · 초당 {tps:.1f}토큰')
 
     def on_generation_finished(self, success, msg):
+        self.set_counseling_busy(False)
         self.generate_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.stop_output_btn.setEnabled(False)
         self.update_system_status()
-        if success:
+        if self._generation_cancelled or msg == '중단':
+            self.status_speed_label.setText('작성 중단됨')
+            self.set_generation_phase('작성을 중단했습니다. 작성된 부분은 그대로 남아 있습니다.')
+            self.status_bar.showMessage('작성한 부분을 남겼습니다. 검토하거나 다시 정리하세요.', 5000)
+        elif success:
             self.last_generated_raw_text = self.output_text.toPlainText().strip()
             self.apply_selected_form_to_output(show_message=False)
-            self.status_bar.showMessage("상담일지 초안 작성이 끝났습니다. 내용을 검토한 뒤 저장하세요.", 5000)
+            self.set_generation_phase('초안 작성을 끝냈습니다. 내용을 검토한 뒤 상담 이력에 저장하세요.')
+            self.status_bar.showMessage('초안 작성이 끝났습니다. 내용을 검토한 뒤 저장하세요.', 5000)
         else:
-            self.status_speed_label.setText("작성 실패")
-            QMessageBox.critical(self, "AI 작성 실패", msg)
+            self.status_speed_label.setText('작성 실패')
+            self.set_generation_phase(f'AI 작성에 실패했습니다: {msg}')
+            QMessageBox.warning(self, 'AI 작성 실패', msg)
+        self.persist_counseling_draft()
+        self.update_counseling_actions()
+        self.ai_started_at = None
+        self.refresh_activity_indicator()
 
     def stop_generation(self):
-        if not self.stop_btn.isEnabled() and not self.stop_output_btn.isEnabled():
+        if not self._generation_busy or not self.worker or not self.worker.isRunning():
             return
-        if self.engine:
-            self.engine.abort()
-        if self.worker and self.worker.isRunning():
-            self.worker.wait(500)
-
-        self.status_speed_label.setText("🛑 작성 중단됨")
-        self.status_bar.showMessage("🛑 사용자에 의해 상담일지 작성이 즉시 중단되었습니다.", 4000)
-
-        cursor = self.output_text.textCursor()
-        cursor.movePosition(cursor.MoveOperation.End)
-        cursor.insertText("\n\n[🛑 사용자에 의해 작성이 중단되었습니다.]")
-        self.output_text.setTextCursor(cursor)
-        self.output_text.ensureCursorVisible()
-
-        self.generate_btn.setEnabled(True)
+        self._generation_cancelled = True
+        self.engine.abort()
         self.stop_btn.setEnabled(False)
         self.stop_output_btn.setEnabled(False)
+        self.status_speed_label.setText('중단 처리 중…')
+        self.set_generation_phase('중단을 요청했습니다. 지금 만들던 문장까지 마치고 멈춥니다.')
 
     def apply_selected_form_to_output(self, _checked=False, show_message=True):
         """AI 결과를 현재 사용자의 워드형 표 양식 셀에 배치합니다."""
@@ -1999,6 +2234,8 @@ class MainWindow(QMainWindow):
         if not template:
             if show_message:
                 QMessageBox.warning(self, "표 양식 적용", "적용할 서류 양식을 선택해 주세요.")
+            return
+        if show_message and self.last_generated_raw_text and not self.confirm_replace('표 양식을 다시 적용하면 원래 AI 초안을 사용합니다. 직접 수정한 내용을 바꿀까요?'):
             return
         generated_text = self.last_generated_raw_text or self.output_text.toPlainText().strip()
         if not generated_text:
@@ -2065,8 +2302,21 @@ class MainWindow(QMainWindow):
         self.mask_stat_label.setText("")
 
     def clear_fields(self):
+        if self._generation_busy:
+            return
+        if (self.input_text.toPlainText().strip() or self.output_text.toPlainText().strip()) and self.counseling_state() != self._saved_state:
+            if not self.confirm_replace('상담 이력에 저장하지 않은 작성 내용을 비우고 새 상담을 시작할까요?'):
+                return
         self.clear_output()
         self.input_text.clear()
+        self.session_date_input.setDate(QDate.currentDate())
+        self.session_method_input.setCurrentIndex(0)
+        self._record_id = None
+        self._saved_state = None
+        self.set_generation_phase()
+        self.persist_counseling_draft()
+        self.update_counseling_actions()
+        self.input_text.setFocus()
 
 def main():
     # Windows 및 Linux 고해상도(HiDPI) 화면 최적화 (QApplication 생성 전 호출 필수)

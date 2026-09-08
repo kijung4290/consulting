@@ -43,7 +43,9 @@ class GenerationWorker(QThread):
                     item.get("total_tokens", 0),
                 )
                 if item.get("done", False):
-                    break
+                    self.finished_signal.emit(not item.get('aborted', False),
+                                              '중단' if item.get('aborted') else '완료')
+                    return
             self.finished_signal.emit(True, "완료")
         except Exception as exc:
             self.finished_signal.emit(False, str(exc))
@@ -61,4 +63,3 @@ class ModelLoadWorker(QThread):
     def run(self):
         ok, message = self.engine.load_model()
         self.finished_signal.emit(ok, message)
-

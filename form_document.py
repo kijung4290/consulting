@@ -197,7 +197,8 @@ def fill_form_html(
             if replacement:
                 matched_content_fields += 1
         token_pattern = re.compile(r"\{\{\s*" + re.escape(clean_placeholder) + r"\s*\}\}")
-        output = token_pattern.sub(_to_html_text(replacement or ""), output)
+        replacement_html = _to_html_text(replacement or "")
+        output = token_pattern.sub(lambda _match: replacement_html, output)
 
     # 사용자 제작 양식과 AI 항목명이 전혀 맞지 않을 때도 결과가 사라지지 않게 본문을 덧붙입니다.
     if generated_text.strip() and matched_content_fields == 0:

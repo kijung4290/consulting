@@ -12,9 +12,9 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QComboBox,
     QTextEdit, QPushButton, QFormLayout, QMessageBox, QTabWidget,
     QTableWidget, QTableWidgetItem, QHeaderView, QFileDialog, QGroupBox,
-    QSplitter, QWidget, QRadioButton, QButtonGroup, QFrame
+    QSplitter, QWidget, QRadioButton, QButtonGroup, QFrame, QDateEdit
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QMimeData
+from PyQt6.QtCore import Qt, pyqtSignal, QMimeData, QDate
 from PyQt6.QtGui import QFont, QColor
 
 from database import Database
@@ -764,6 +764,15 @@ class ManualCounselingDialog(QDialog):
         self.setWindowTitle("✍️ 수기 상담기록 직접 작성")
         self.resize(680, 600)
         self.init_ui()
+        self._initial_content = self.content_text.toHtml()
+
+    def reject(self):
+        if self.content_text.toHtml() != self._initial_content:
+            answer = QMessageBox.question(self, '작성 내용 확인', '저장하지 않은 상담 내용을 버리고 닫을까요?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        super().reject()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -777,6 +786,7 @@ class ManualCounselingDialog(QDialog):
         b_title.setFont(QFont("Malgun Gothic", 11, QFont.Weight.Bold))
         b_title.setStyleSheet("color: #3730A3;")
         b_desc = QLabel("AI 변환 없이 면담 내용, 전화 상담, 가정방문 결과를 직접 타이핑하여 대상자의 상담 이력에 영구 누적 저장합니다.")
+        b_desc.setWordWrap(True)
         b_desc.setStyleSheet("color: #4338CA; font-size: 11px;")
         b_layout.addWidget(b_title)
         b_layout.addWidget(b_desc)
@@ -802,7 +812,9 @@ class ManualCounselingDialog(QDialog):
 
         # 일자 및 작성자
         row_date_worker = QHBoxLayout()
-        self.date_input = QLineEdit(datetime.now().strftime("%Y-%m-%d"))
+        self.date_input = QDateEdit(QDate.currentDate())
+        self.date_input.setCalendarPopup(True)
+        self.date_input.setDisplayFormat('yyyy-MM-dd')
         self.date_input.setMaximumWidth(140)
         self.worker_input = QLineEdit(self.current_profile["name"])
         self.worker_input.setMaximumWidth(140)
@@ -882,7 +894,7 @@ class ManualCounselingDialog(QDialog):
 
     def save_record(self):
         content = self.content_text.toPlainText().strip()
-        if not content:
+        if not content or self.content_text.toHtml() == self._initial_content:
             QMessageBox.warning(self, "확인", "상담 기록 본문 내용을 입력해 주세요.")
             return
 
@@ -907,7 +919,11 @@ class ManualCounselingDialog(QDialog):
             "worker_name": worker
         }
 
-        self.db.add_counseling_record(data)
+        try:
+            self.db.add_counseling_record(data)
+        except Exception as exc:
+            QMessageBox.warning(self, '상담 저장 실패', f'내용은 작성 화면에 남아 있습니다.\n{exc}')
+            return
         QMessageBox.information(self, "저장 완료", "수기 상담 기록이 성공적으로 등록되었습니다!")
         self.accept()
 
@@ -947,6 +963,7 @@ class ManualCounselingDialog(QDialog):
         )
         form_html = fill_form_html(base_form_html, metadata=metadata)
         self.content_text.setHtml(form_html)
+        self._initial_content = self.content_text.toHtml()
 
 
 class TextViewerDialog(QDialog):

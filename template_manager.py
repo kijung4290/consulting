@@ -1,6 +1,7 @@
 """사용자별 로컬 서류 양식 생성·편집 화면."""
 
 import json
+import os
 from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt
@@ -187,9 +188,10 @@ class TemplateManagerPage(QWidget):
         self.owner_label.setStyleSheet("color: #145A4D; font-weight: 700;")
         approval_settings_btn = QPushButton("결재라인 설정")
         approval_settings_btn.clicked.connect(self.open_approval_line_editor)
-        self.storage_label = QLabel(f"로컬 저장: {self.db.db_path}")
+        self.storage_label = QLabel()
         self.storage_label.setStyleSheet("color: #52656A; font-size: 10px;")
         self.storage_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.set_storage_path(self.db.db_path)
         info_layout.addWidget(self.owner_label)
         info_layout.addWidget(approval_settings_btn)
         info_layout.addStretch()
@@ -649,6 +651,15 @@ class TemplateManagerPage(QWidget):
         dialog.deleteLater()
         self.form_editor.setFocus()
 
+    def set_storage_path(self, db_path: str) -> None:
+        """전체 경로는 데이터 관리 · 데이터 백업·복원 탭에서 보여주므로 여기서는 파일명만 남긴다.
+
+        긴 절대 경로를 그대로 붙이면 이 화면의 최소 너비가 경로 길이만큼 늘어나
+        1366×768 노트북에서 가로 스크롤이 생기기 때문이다.
+        """
+        self.storage_label.setText(f"로컬 저장: {os.path.basename(db_path)}")
+        self.storage_label.setToolTip(db_path)
+
     def set_profile(self, profile_id: int) -> None:
         self.profile_id = profile_id
         self.current_template_id = None
@@ -656,6 +667,9 @@ class TemplateManagerPage(QWidget):
         self.refresh_templates()
 
     def refresh_templates(self, select_id: int = None) -> None:
+        if select_id is None and self.has_unsaved_changes():
+            return
+        select_id = select_id or self.current_template_id
         profile = self.db.get_profile(self.profile_id) or {"name": "알 수 없음"}
         self.owner_label.setText(f"현재 사용자: {profile['name']} · 이 사용자에게만 적용")
         self.refresh_approval_preview()
@@ -679,7 +693,13 @@ class TemplateManagerPage(QWidget):
 
     def _load_selected(self, current, _previous) -> None:
         if current:
-            template = self.db.get_form_template(current.data(Qt.ItemDataRole.UserRole), self.profile_id)
+            target_id = current.data(Qt.ItemDataRole.UserRole)
+            if not self.may_leave():
+                self.template_list.blockSignals(True)
+                self.template_list.setCurrentItem(_previous)
+                self.template_list.blockSignals(False)
+                return
+            template = self.db.get_form_template(target_id, self.profile_id)
             if template:
                 self._load_template(template)
 
@@ -699,8 +719,12 @@ class TemplateManagerPage(QWidget):
         self.delete_btn.setEnabled(not bool(self.current_source_key))
         self.duplicate_btn.setEnabled(True)
         self.export_btn.setEnabled(True)
+        self._baseline = self._editor_data()
+        self.form_editor.document().setModified(False)
 
     def new_template(self) -> None:
+        if not self.may_leave():
+            return
         self.template_list.clearSelection()
         self.current_template_id = None
         self.current_source_key = None
@@ -715,6 +739,35 @@ class TemplateManagerPage(QWidget):
         self.duplicate_btn.setEnabled(False)
         self.export_btn.setEnabled(False)
         self.name_input.setFocus()
+        self._baseline = self._editor_data()
+        self.form_editor.document().setModified(False)
+
+    def has_unsaved_changes(self):
+        if not hasattr(self, '_baseline'):
+            return False
+        # 화면 스타일이 바꾼 문서 기본 글꼴을 사용자 편집으로 오인하지 않는다.
+        data = self._editor_data()
+        return self.form_editor.document().isModified() or any(
+            data[key] != self._baseline[key] for key in data if key != 'form_html')
+
+    def may_leave(self):
+        if not self.has_unsaved_changes():
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle('양식 변경 내용')
+        box.setText('수정한 양식을 저장할까요?')
+        save = box.addButton('저장하고 계속', QMessageBox.ButtonRole.AcceptRole)
+        discard = box.addButton('변경 버리기', QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton('계속 편집', QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel)
+        box.exec()
+        if box.clickedButton() == save:
+            return bool(self.save_template())
+        if box.clickedButton() == discard:
+            self._baseline = self._editor_data()
+            self.form_editor.document().setModified(False)
+            return True
+        return False
 
     def _editor_data(self) -> dict:
         return {
@@ -733,15 +786,19 @@ class TemplateManagerPage(QWidget):
                 self._editor_data(),
                 template_id=self.current_template_id,
             )
-        except ValueError as exc:
+        except Exception as exc:
             QMessageBox.warning(self, "양식 저장 확인", str(exc))
-            return
+            return False
         self.current_template_id = template_id
+        self._baseline = self._editor_data()
+        self.form_editor.document().setModified(False)
         self.refresh_templates(select_id=template_id)
         self._notify_changed()
-        QMessageBox.information(self, "저장 완료", "내 서류 양식이 로컬 저장소에 저장되었습니다.")
+        return True
 
     def duplicate_template(self) -> None:
+        if not self.may_leave():
+            return
         if not self.current_template_id:
             return
         try:
@@ -818,6 +875,8 @@ class TemplateManagerPage(QWidget):
             QMessageBox.critical(self, "내보내기 실패", str(exc))
 
     def import_template(self) -> None:
+        if not self.may_leave():
+            return
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "서류 양식 가져오기",

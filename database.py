@@ -248,6 +248,14 @@ class Database:
             self._ensure_column(conn, "counseling_records", "owner_id", "INTEGER")
             self._ensure_column(conn, "counseling_records", "result_html", "TEXT DEFAULT ''")
             self._ensure_column(conn, "counseling_records", "updated_at", "TEXT DEFAULT ''")
+            self._ensure_column(conn, "counseling_records", "session_method", "TEXT DEFAULT ''")
+            cursor.execute("""CREATE TABLE IF NOT EXISTS counseling_drafts (
+                owner_id INTEGER NOT NULL REFERENCES worker_profiles(id) ON DELETE CASCADE,
+                slot TEXT NOT NULL,
+                client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,
+                state_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(owner_id, slot))""")
             self._ensure_column(conn, "documents", "updated_at", "TEXT DEFAULT ''")
             self._ensure_column(conn, "form_templates", "form_html", "TEXT DEFAULT ''")
             self._ensure_column(conn, "worker_profiles", "approval_line_json", "TEXT DEFAULT ''")
@@ -412,9 +420,9 @@ class Database:
             cursor.execute("""
             INSERT INTO counseling_records (
                 client_id, session_date, template_name, template_id, template_snapshot, owner_id,
-                detail_level, raw_memo, ai_result, result_html, worker_name
+                detail_level, raw_memo, ai_result, result_html, worker_name, session_method
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.get("client_id"),
                 data.get("session_date", datetime.now().strftime("%Y-%m-%d")),
@@ -426,10 +434,45 @@ class Database:
                 data.get("raw_memo", ""),
                 data.get("ai_result", ""),
                 data.get("result_html", ""),
-                data.get("worker_name", "담당복지사")
+                data.get("worker_name", "담당복지사"),
+                data.get("session_method", "")
             ))
             conn.commit()
             return cursor.lastrowid
+
+    def save_counseling_draft(self, owner_id, client_id, state):
+        with self.get_connection() as conn:
+            if not state.get('memo', '').strip() and not state.get('text', '').strip():
+                conn.execute('DELETE FROM counseling_drafts WHERE owner_id=? AND slot=?',
+                             (owner_id, str(client_id or 'general')))
+                return
+            conn.execute("""INSERT INTO counseling_drafts(owner_id, slot, client_id, state_json)
+                VALUES (?, ?, ?, ?) ON CONFLICT(owner_id, slot) DO UPDATE SET
+                state_json=excluded.state_json, updated_at=CURRENT_TIMESTAMP""",
+                (owner_id, str(client_id or 'general'), client_id, json.dumps(state, ensure_ascii=False)))
+
+    def get_counseling_draft(self, owner_id, client_id):
+        with self.get_connection() as conn:
+            row = conn.execute('SELECT state_json FROM counseling_drafts WHERE owner_id=? AND slot=?',
+                               (owner_id, str(client_id or 'general'))).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def update_counseling_record(self, record_id, data):
+        """작성실에서 다시 저장할 때 원본 메모와 양식을 함께 갱신한다."""
+        fields = ('session_date', 'template_name', 'template_id', 'template_snapshot',
+                  'detail_level', 'raw_memo', 'ai_result', 'result_html', 'worker_name', 'session_method')
+        values = [json.dumps(data[k], ensure_ascii=False) if k == 'template_snapshot' else data.get(k, '')
+                  for k in fields]
+        with self.get_connection() as conn:
+            if data.get('_expected'):
+                row = conn.execute('SELECT * FROM counseling_records WHERE id=?', (record_id,)).fetchone()
+                if row and any(row[k] != v for k, v in data['_expected'].items()):
+                    raise ValueError('이 기록이 서류 보관함 등에서 수정되었습니다. 현재 본문을 복사해 보관하고 최신 기록을 확인하세요.')
+            cursor = conn.execute('UPDATE counseling_records SET ' + ', '.join(f'{k}=?' for k in fields)
+                + ', updated_at=CURRENT_TIMESTAMP WHERE id=? AND owner_id=? AND client_id IS ?',
+                (*values, record_id, data['owner_id'], data['client_id']))
+            if cursor.rowcount != 1:
+                raise ValueError('기록이 삭제되었거나 작성자·대상자가 다릅니다. 본문을 복사해 보관한 뒤 새 상담을 시작하세요.')
 
     # ================= [작업자 프로필·사용자별 서류 양식] =================
     def create_profile(self, name: str) -> int:
