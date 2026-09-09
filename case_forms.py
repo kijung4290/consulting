@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from form_document import PLACEHOLDER_PATTERN, inject_approval_line
-from ui_theme import set_button_role
+from ui_theme import make_page_header, set_button_role
 
 
 STAGE_FORMS = {
@@ -184,11 +184,23 @@ class CaseFormsPanel(QWidget):
         super().__init__(parent)
         self.db, self.client_id = db, None
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(12)
+        root.addWidget(make_page_header(
+            '사례관리 서류 작성',
+            '대상자를 고른 뒤 진행단계에 맞는 서류를 새로 작성하거나 저장된 이력을 이어서 작성합니다.',
+            'CASE FORM WORKSPACE',
+        ))
         bar = QHBoxLayout()
+        self.client_combo = QComboBox()
+        self.client_combo.setMinimumWidth(240)
+        self.client_combo.currentIndexChanged.connect(self._on_client_changed)
+        bar.addWidget(QLabel('대상자'))
+        bar.addWidget(self.client_combo)
         self.stage = QComboBox()
         self.stage.addItems(['전체 서류', *STAGE_FORMS])
         self.stage.currentTextChanged.connect(self.refresh)
-        bar.addWidget(QLabel('단계별 서류'))
+        bar.addWidget(QLabel('진행단계'))
         bar.addWidget(self.stage)
         self.summary = QLabel('대상자를 선택해 주세요.')
         bar.addWidget(self.summary, 1)
@@ -212,9 +224,42 @@ class CaseFormsPanel(QWidget):
         root.addWidget(QLabel('작성 이력 · 반복 상담은 새로 작성하세요. 다른 작성자의 서류는 열람할 수 있습니다.'))
         self.history = QComboBox()
         root.addWidget(self.history)
+        self.refresh_clients()
+
+    def set_database(self, db):
+        self.db = db
+        self.client_id = None
+        self.refresh_clients()
+
+    def refresh_clients(self, select_client_id=None):
+        wanted = select_client_id if select_client_id is not None else self.client_combo.currentData()
+        self.client_combo.blockSignals(True)
+        self.client_combo.clear()
+        self.client_combo.addItem('대상자를 선택하세요', None)
+        selected = 0
+        for index, client in enumerate(self.db.list_clients(), start=1):
+            self.client_combo.addItem(
+                f"{client['name']} · {client.get('masked_name', '')} · {client.get('risk_level', '일반')}",
+                client['id'],
+            )
+            if client['id'] == wanted:
+                selected = index
+        self.client_combo.setCurrentIndex(selected)
+        self.client_combo.blockSignals(False)
+        self._on_client_changed()
+
+    def _on_client_changed(self, *_):
+        self.client_id = self.client_combo.currentData()
+        if self.client_id:
+            profile = self.db.get_case_profile(self.client_id)
+            if self.stage.currentText() == '전체 서류':
+                self.stage.blockSignals(True)
+                self.stage.setCurrentText(profile.get('stage', '접수'))
+                self.stage.blockSignals(False)
+        self.refresh()
 
     def set_client(self, client_id, stage):
-        self.client_id = client_id
+        self.refresh_clients(select_client_id=client_id)
         self.stage.blockSignals(True)
         self.stage.setCurrentText(stage if stage in STAGE_FORMS else '전체 서류')
         self.stage.blockSignals(False)
@@ -224,6 +269,7 @@ class CaseFormsPanel(QWidget):
         if not self.client_id:
             self.table.setRowCount(0)
             self.history.clear()
+            self.summary.setText('대상자를 선택해 주세요.')
             return
         owner = self.db.get_current_profile()['id']
         templates = self.db.list_form_templates(owner)

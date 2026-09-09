@@ -1,4 +1,4 @@
-"""대상자별 사례관리 5대 업무를 한 화면에서 처리하는 작업판."""
+"""대상자별 맥락과 진행 현황을 검토하는 사례관리 작업판."""
 
 import json
 from typing import Optional
@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
 )
 
 from database import Database
-from case_forms import CaseFormsPanel
 from ui_theme import make_page_header, set_button_role
 from client_context import collect_source_index, read_context, source_key
 
@@ -21,6 +20,130 @@ from client_context import collect_source_index, read_context, source_key
 STAGES = ["접수", "사정", "계획", "개입", "점검", "종결", "사후관리"]
 ASSESSMENT_DOMAINS = ["경제", "건강", "주거", "돌봄", "가족관계", "사회관계", "고용·교육", "안전"]
 RISK_LEVELS = ["0 · 안정", "1 · 관찰", "2 · 주의", "3 · 긴급"]
+
+
+class CaseDocumentsOverviewPanel(QWidget):
+    """사례관리 화면에서 대상자별 작성 서류를 읽기 전용으로 확인한다."""
+
+    def __init__(self, db, open_workspace, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.client_id = None
+        self.documents = []
+        self.open_workspace = open_workspace
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 10, 8, 8)
+        root.setSpacing(10)
+
+        guide = QHBoxLayout()
+        self.summary = QLabel('대상자를 선택해 주세요.')
+        self.summary.setObjectName('sectionHint')
+        guide.addWidget(self.summary, stretch=1)
+        workspace_btn = QPushButton('서류작성 및 보관함에서 작성·관리')
+        set_button_role(workspace_btn, 'primary')
+        workspace_btn.clicked.connect(self._open_workspace)
+        guide.addWidget(workspace_btn)
+        root.addLayout(guide)
+
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(['등록·수정일', '구분', '서류', '상태'])
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().hide()
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.itemSelectionChanged.connect(self._show_selected)
+        root.addWidget(self.table, stretch=2)
+
+        self.detail = QTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setPlaceholderText('서류를 선택하면 저장된 내용을 여기에서 확인할 수 있습니다.')
+        root.addWidget(self.detail, stretch=2)
+
+    def set_database(self, db):
+        self.db = db
+        self.client_id = None
+        self.refresh()
+
+    def set_client(self, client_id):
+        self.client_id = client_id
+        self.refresh()
+
+    def refresh(self):
+        self.documents = self.db.list_document_registry(client_id=self.client_id) if self.client_id else []
+        self.table.setRowCount(len(self.documents))
+        for row, document in enumerate(self.documents):
+            values = [
+                str(document.get('created_at') or '')[:16],
+                document.get('doc_type') or '',
+                document.get('title') or '',
+                document.get('status') or ('첨부됨' if document.get('source_type') == 'attachment' else ''),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, document)
+                self.table.setItem(row, column, item)
+        case_forms = sum(d.get('source_type') == 'case_form' for d in self.documents)
+        counseling = sum(d.get('source_type') == 'counseling' for d in self.documents)
+        attachments = sum(d.get('source_type') == 'attachment' for d in self.documents)
+        self.summary.setText(
+            f'전체 {len(self.documents)}건 · 사례관리 서류 {case_forms}건 · 상담일지 {counseling}건 · 첨부·직접작성 {attachments}건'
+            if self.client_id else '대상자를 선택해 주세요.'
+        )
+        self.detail.clear()
+        if self.documents:
+            self.table.selectRow(0)
+            self._show_selected()
+        elif self.client_id:
+            self.detail.setPlainText('이 대상자에게 저장된 서류가 없습니다.\n\n'
+                                     '[서류작성 및 보관함에서 작성·관리]를 눌러 첫 서류를 작성하세요.')
+
+    def _selected_document(self):
+        row = self.table.currentRow()
+        item = self.table.item(row, 0) if row >= 0 else None
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _show_selected(self):
+        document = self._selected_document()
+        if not document:
+            return
+        header = [
+            f"서류: {document.get('title') or ''}",
+            f"구분: {document.get('doc_type') or ''}",
+            f"등록·수정일: {str(document.get('created_at') or '')[:16]}",
+        ]
+        source_type = document.get('source_type')
+        body = ''
+        if source_type == 'case_form':
+            record = next((row for row in self.db.list_case_forms(self.client_id)
+                           if row['id'] == document['id']), None)
+            if record:
+                header.extend((f"진행단계: {record.get('stage') or ''}",
+                               f"작성상태: {record.get('status') or ''}"))
+                try:
+                    fields = json.loads(record.get('fields_json') or '{}')
+                except ValueError:
+                    fields = {}
+                body = '\n'.join(f'{name}: {value}' for name, value in fields.items()
+                                 if str(value or '').strip())
+        elif source_type == 'counseling':
+            with self.db.get_connection() as conn:
+                record = conn.execute('SELECT * FROM counseling_records WHERE id=?',
+                                      (document['id'],)).fetchone()
+            if record:
+                data = dict(record)
+                header.extend((f"상담일: {data.get('session_date') or ''}",
+                               f"작성자: {data.get('worker_name') or ''}"))
+                body = data.get('ai_result') or data.get('raw_memo') or ''
+        else:
+            header.append(f"상태: {document.get('status') or '첨부됨'}")
+            body = document.get('notes') or '첨부된 원본 서류입니다. 열람과 수정은 서류 보관함에서 진행하세요.'
+        self.detail.setPlainText('\n'.join(header) + '\n\n' + body)
+
+    def _open_workspace(self):
+        if self.client_id:
+            self.open_workspace(self.client_id)
 
 
 class ContextSourceDialog(QDialog):
@@ -97,6 +220,7 @@ class ContextSourceDialog(QDialog):
 
 class CaseManagementPage(QWidget):
     status_message = pyqtSignal(str)
+    document_workspace_requested = pyqtSignal(int)
 
     def __init__(self, db: Database, parent=None):
         super().__init__(parent)
@@ -119,7 +243,7 @@ class CaseManagementPage(QWidget):
         root.setSpacing(12)
         root.addWidget(make_page_header(
             "사례관리 작업판",
-            "단계별 서류를 작성하고 이력을 확인하세요. 보조 업무 탭의 입력은 대상자별로 구분됩니다.",
+            "대상자별 맥락과 작성 서류, 사정·계획·모니터링·서비스 연계를 한 흐름에서 점검합니다.",
             "CASE MANAGEMENT",
         ))
 
@@ -177,9 +301,10 @@ class CaseManagementPage(QWidget):
         self.context_text = QTextEdit()
         self.context_text.setReadOnly(True)
         context_layout.addWidget(self.context_text)
-        self.tabs.addTab(context_page, "AI 대상자 맥락")
-        self.forms_panel = CaseFormsPanel(self.db)
-        self.tabs.addTab(self.forms_panel, "단계별 서류·작성 이력")
+        self.tabs.addTab(context_page, "대상자 맥락")
+        self.documents_panel = CaseDocumentsOverviewPanel(
+            self.db, lambda client_id: self.document_workspace_requested.emit(client_id))
+        self.tabs.addTab(self.documents_panel, "작성 서류 현황")
         for page, title in ((self._build_assessment_tab(), "욕구·위기도 사정"),
                             (self._build_goals_tab(), "목표·개입계획"),
                             (self._build_monitoring_tab(), "모니터링 일정"),
@@ -189,7 +314,7 @@ class CaseManagementPage(QWidget):
             scroll.setWidget(page)
             self.tabs.addTab(scroll, title)
         root.addWidget(self.tabs, stretch=1)
-        self.tabs.setCurrentIndex(1)
+        self.tabs.setCurrentIndex(0)
 
     def stop_timers(self):
         """창을 닫거나 저장 위치를 바꿀 때 주기 갱신을 멈춘다."""
@@ -485,7 +610,7 @@ class CaseManagementPage(QWidget):
 
     def set_database(self, db: Database):
         self.db = db
-        self.forms_panel.db = db
+        self.documents_panel.set_database(db)
         self.client_id = None
         self._client_drafts.clear()
         self.refresh_clients()
@@ -545,7 +670,7 @@ class CaseManagementPage(QWidget):
         if not enabled:
             self.case_summary.setText("대상자를 선택해 주세요.")
             self._clear_tables()
-            self.forms_panel.set_client(None, '접수')
+            self.documents_panel.set_client(None)
             return
         client = self.db.get_client(self.client_id)
         self.case_summary.setText(
@@ -581,7 +706,7 @@ class CaseManagementPage(QWidget):
         profile = self.db.get_case_profile(self.client_id)
         self.stage_combo.setCurrentText(profile.get("stage", "접수"))
         self.stage_note.setText(profile.get("stage_note", ""))
-        self.forms_panel.set_client(self.client_id, profile.get('stage', '접수'))
+        self.documents_panel.set_client(self.client_id)
         self._refresh_assessments()
         self._refresh_goals()
         self._refresh_monitoring()
@@ -592,7 +717,7 @@ class CaseManagementPage(QWidget):
         if not self._require_client():
             return
         self.db.save_case_profile(self.client_id, self.stage_combo.currentText(), self.stage_note.text().strip())
-        self.forms_panel.set_client(self.client_id, self.stage_combo.currentText())
+        self.documents_panel.refresh()
         self.status_message.emit(f"사례 진행단계를 '{self.stage_combo.currentText()}'로 저장했습니다.")
 
     def _save_assessment(self):

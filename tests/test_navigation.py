@@ -8,7 +8,8 @@ from PyQt6.QtCore import QDate
 from PyQt6.QtWidgets import QApplication
 from app import (MainWindow, NAV_MENUS, PAGE_CLIENTS, PAGE_CASE, PAGE_DOCS, PAGE_DATA,
                  CLIENT_TAB_LIST, CLIENT_TAB_DUE, CLIENT_TAB_RECENT,
-                 DOCS_TAB_WRITE, DOCS_TAB_VAULT, DATA_TAB_FORMS, DATA_TAB_BACKUP,
+                 DOCS_TAB_WRITE, DOCS_TAB_CASE_FORMS, DOCS_TAB_VAULT,
+                 DATA_TAB_FORMS, DATA_TAB_BACKUP,
                  CASE_TAB_MONITORING)
 from database import Database
 
@@ -81,7 +82,7 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual([w.client_tabs.tabText(i) for i in range(w.client_tabs.count())],
                          ['대상자 목록', '확인할 일정', '최근 상담', '최근 서류'])
         self.assertEqual([w.docs_tabs.tabText(i) for i in range(w.docs_tabs.count())],
-                         ['상담일지 작성', '서류 보관함'])
+                         ['상담일지 작성', '사례관리 서류 작성', '서류 보관함'])
         self.assertEqual([w.data_tabs.tabText(i) for i in range(w.data_tabs.count())],
                          ['서류 양식', '데이터 백업·복원'])
 
@@ -119,6 +120,16 @@ class NavigationTests(unittest.TestCase):
         w.switch_to_ai_counsel_with_client(self.client)
         self.assertTrue(w.on_counseling_tab())
         self.assertEqual(w.ai_client_combo.currentData(), self.client)
+
+    def test_case_document_status_leads_to_the_same_client_writing_workspace(self):
+        w = self.window
+        w.switch_page(PAGE_CASE)
+        w.case_management_page.select_client(self.client)
+        w.case_management_page.documents_panel._open_workspace()
+        self.assertEqual((w.stacked_widget.currentIndex(), w.docs_tabs.currentIndex()),
+                         (PAGE_DOCS, DOCS_TAB_CASE_FORMS))
+        self.assertEqual(w.case_forms_panel.client_id, self.client)
+        self.assertEqual(w.case_forms_panel.client_combo.currentData(), self.client)
 
     def test_due_task_opens_the_case_monitoring_tab(self):
         w = self.window

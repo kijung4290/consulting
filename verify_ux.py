@@ -11,7 +11,8 @@ from PyQt6.QtWidgets import QApplication, QScrollArea
 from database import Database
 from app import (MainWindow, PAGE_CLIENTS, PAGE_CASE, PAGE_DOCS, PAGE_DATA,
                  CLIENT_TAB_LIST, CLIENT_TAB_DUE, CLIENT_TAB_RECENT, CLIENT_TAB_DOCS,
-                 DOCS_TAB_WRITE, DOCS_TAB_VAULT, DATA_TAB_FORMS, DATA_TAB_BACKUP,
+                 DOCS_TAB_WRITE, DOCS_TAB_CASE_FORMS, DOCS_TAB_VAULT,
+                 DATA_TAB_FORMS, DATA_TAB_BACKUP,
                  CASE_TAB_CONTEXT)
 
 
@@ -63,6 +64,8 @@ def main():
                                'welfare_type': '기초수급', 'gender': '여'})
         db.add_client({'name': '이가상', 'masked_name': '이OO', 'risk_level': '일반', 'gender': '남'})
         db.add_monitoring_task(first, '전화 확인', QDate.currentDate().toString('yyyy-MM-dd'), '식사 준비 상황과 지원 희망 여부 확인')
+        db.add_text_document(first, '가상 소득 확인 메모', '기타 증빙서류/메모',
+                             '화면 검증용 가상 서류입니다.', '실제 대상자 정보가 아닙니다.')
         window = MainWindow()
         window.context_controller.stop()
         real_context = window.context_controller
@@ -74,6 +77,7 @@ def main():
         window.persist_counseling_draft()
         # 업무 메뉴 4화면과 그 안의 보조 탭을 모두 지나며 화면 잘림을 확인한다.
         screens = ((PAGE_DOCS, DOCS_TAB_WRITE, 'counseling'),
+                   (PAGE_DOCS, DOCS_TAB_CASE_FORMS, 'case_forms'),
                    (PAGE_CLIENTS, CLIENT_TAB_LIST, 'clients'),
                    (PAGE_CLIENTS, CLIENT_TAB_DUE, 'clients_due'),
                    (PAGE_CLIENTS, CLIENT_TAB_RECENT, 'clients_recent'),
@@ -88,6 +92,11 @@ def main():
                 {PAGE_CLIENTS: window.client_tabs,
                  PAGE_DOCS: window.docs_tabs,
                  PAGE_DATA: window.data_tabs}[index].setCurrentIndex(tab)
+            if index == PAGE_CASE:
+                window.case_management_page.select_client(first)
+                window.case_management_page.tabs.setCurrentIndex(1)
+            elif index == PAGE_DOCS and tab == DOCS_TAB_CASE_FORMS:
+                window.case_forms_panel.set_client(first, '접수')
             for _ in range(5):
                 app.processEvents()
             window.grab().save(str(output / f'{name}.png'))
@@ -109,7 +118,9 @@ def main():
             app.processEvents()
         window.grab().save(str(output / 'ai_activity.png'))
         print('ai_activity', window.activity_title.text(), '|', window.activity_detail.text())
-        print('context', window.case_management_page.context_status.text().splitlines()[0])
+        # 일부 Windows 콘솔(cp949)은 진행 아이콘을 출력하지 못하므로 검증 로그에서는 글자만 남긴다.
+        context_status = window.case_management_page.context_status.text().splitlines()[0].replace('🔄', '').strip()
+        print('context', context_status)
         window.context_controller = real_context
 
         window.resize(880, 540)

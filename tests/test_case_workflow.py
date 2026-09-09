@@ -69,9 +69,33 @@ class CaseWorkflowTests(unittest.TestCase):
         self.assertEqual(page.assessment_inputs['경제'].currentIndex(), 3)
         page.stage_combo.setCurrentText('사후관리')
         page._save_stage()
-        self.assertEqual(page.forms_panel.table.rowCount(), 1)
-        self.assertEqual(page.forms_panel.table.item(0, 0).text(), '사후관리평가서 (사후관리상담지)')
+        self.assertEqual(page.documents_panel.table.rowCount(), 0)
+        self.assertIn('전체 0건', page.documents_panel.summary.text())
         page.close()
+
+    def test_case_page_reads_each_clients_documents_without_writing_controls(self):
+        dialog = CaseFormDialog(self.db, self.first, self.owner, '접수', self.template)
+        dialog.inputs['상담 내용'].setPlainText('초기 상담에서 확인한 내용')
+        self.assertTrue(dialog.save('작성완료'))
+        self.db.add_text_document(self.first, '소득 확인 메모', '기타 증빙서류/메모', '확인 내용')
+        self.db.add_text_document(self.second, '다른 대상자 서류', '기타 증빙서류/메모', '분리 내용')
+
+        page = CaseManagementPage(self.db)
+        page.select_client(self.first)
+        self.assertEqual(page.tabs.tabText(0), '대상자 맥락')
+        self.assertEqual(page.tabs.tabText(1), '작성 서류 현황')
+        self.assertEqual(page.documents_panel.table.rowCount(), 2)
+        titles = {page.documents_panel.table.item(row, 2).text()
+                  for row in range(page.documents_panel.table.rowCount())}
+        self.assertEqual(titles, {'초기상담지', '소득 확인 메모'})
+        self.assertNotIn('다른 대상자 서류', titles)
+        page.documents_panel.table.selectRow(next(
+            row for row in range(page.documents_panel.table.rowCount())
+            if page.documents_panel.table.item(row, 2).text() == '초기상담지'))
+        self.assertIn('초기 상담에서 확인한 내용', page.documents_panel.detail.toPlainText())
+        self.assertTrue(page.documents_panel.detail.isReadOnly())
+        page.close()
+        dialog.close()
 
 
 if __name__ == '__main__':

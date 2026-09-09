@@ -8,7 +8,8 @@
   메뉴와 화면 인덱스는 모듈 상단의 `NAV_MENUS`, `PAGE_*`, 화면 안의 탭은 `CLIENT_TAB_*`,
   `DOCS_TAB_*`, `DATA_TAB_*` 상수로 한 곳에서 관리한다
 - `counseling_workspace.py`: 상담 작성 UI, 사용자·대상자별 임시 저장과 복구, 생성 중 편집 상태
-- `case_management.py`: 진행단계, 사정, 개입계획, 모니터링, 서비스 연계 작업판
+- `case_management.py`: 대상자 맥락과 작성 서류를 읽기 전용으로 검토하고 진행단계, 사정, 개입계획, 모니터링, 서비스 연계를 관리하는 작업판
+- `case_forms.py`: 서류작성 및 보관함 안에서 대상자별 사례관리 14종 서류를 작성·이어쓰기·출력하는 작업면
 - `counseling_report.py`: 대상자·양식·기간별 상담일지 조회와 인쇄·PDF 출력
 - `template_manager.py`: 작업자별 서류 양식 생성·편집·복사·초기화·JSON 입출력
 - `form_designer.py`: 검색·드래그 가능한 복지서식 블록 팔레트, 보기 배율과 선택 복제·삭제를 지원하는 리치 문서 캔버스

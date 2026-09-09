@@ -3,8 +3,8 @@
 
 업무 메뉴는 현장에서 실제로 나누어 쓰는 네 가지 일로만 구성한다.
 - 👥 대상자 관리 (업무 현황 요약 + 대상자 등록·검색·위기도 + 확인할 일정·최근 기록)
-- 🗂 사례관리 (AI 대상자 맥락, 단계별 서류, 사정·목표·모니터링·연계 등 전체 과정 검토)
-- 📝 서류작성 및 보관함 (상담일지 작성 + 첨부·직접 작성 서류 검색·열람)
+- 🗂 사례관리 (AI 대상자 맥락, 작성 서류 현황, 사정·목표·모니터링·연계 등 전체 과정 검토)
+- 📝 서류작성 및 보관함 (상담일지·사례관리 서류 작성 + 모든 서류 검색·열람)
 - ⚙️ 데이터 관리 (서류 양식 편집 + 전체 백업·복원, 저장 위치)
 """
 
@@ -52,6 +52,7 @@ from download_model import get_model_path, is_model_downloaded
 from ui_theme import APP_STYLESHEET, make_action_card, make_page_header, set_button_role
 from workers import DownloadWorker, GenerationWorker, ModelLoadWorker
 from case_management import CaseManagementPage
+from case_forms import CaseFormsPanel
 from counseling_report import CounselingReportDialog
 from template_manager import TemplateManagerPage
 from form_document import build_form_html, fill_form_html, inject_approval_line
@@ -77,7 +78,8 @@ CLIENT_TAB_DOCS = 3
 
 # 서류작성 및 보관함 화면 안의 탭
 DOCS_TAB_WRITE = 0
-DOCS_TAB_VAULT = 1
+DOCS_TAB_CASE_FORMS = 1
+DOCS_TAB_VAULT = 2
 
 # 데이터 관리 화면 안의 탭
 DATA_TAB_FORMS = 0
@@ -265,6 +267,7 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
         )
         self.case_management_page = CaseManagementPage(self.db, self)
         self.case_management_page.status_message.connect(lambda message: self.status_bar.showMessage(message, 4000))
+        self.case_management_page.document_workspace_requested.connect(self.open_case_form_workspace)
 
         self.stacked_widget = QStackedWidget()
         self.stacked_widget.addWidget(self.create_clients_page())    # PAGE_CLIENTS
@@ -491,6 +494,7 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
             self.case_management_page.refresh_clients()
         elif page_idx == PAGE_DOCS:
             self.refresh_ai_client_combo()
+            self.case_forms_panel.refresh_clients()
             self.populate_doc_client_filter()
             self.refresh_documents_table()
         elif page_idx == PAGE_DATA:
@@ -512,6 +516,14 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
     def open_document_vault(self):
         self.switch_page(PAGE_DOCS)
         self.docs_tabs.setCurrentIndex(DOCS_TAB_VAULT)
+
+    def open_case_form_workspace(self, client_id: int = None):
+        """사례관리에서 보던 대상자를 유지한 채 정식 서류 작성 탭을 연다."""
+        self.switch_page(PAGE_DOCS)
+        self.docs_tabs.setCurrentIndex(DOCS_TAB_CASE_FORMS)
+        if client_id:
+            profile = self.db.get_case_profile(client_id)
+            self.case_forms_panel.set_client(client_id, profile.get('stage', '접수'))
 
     def open_form_designer(self):
         self.switch_page(PAGE_DATA)
@@ -1136,7 +1148,7 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
             self.refresh_dashboard()
     # ================= [PAGE_DOCS: 서류작성 및 보관함] =================
     def create_docs_page(self) -> QWidget:
-        """상담일지를 쓰는 곳과 완성된 서류를 찾는 곳을 한 메뉴 안의 두 탭으로 둔다."""
+        """모든 서류 작성과 완성된 서류 보관을 한 메뉴 안의 세 탭으로 둔다."""
         page = QWidget()
         page.setObjectName("pageRoot")
         layout = QVBoxLayout(page)
@@ -1146,6 +1158,8 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
         self.docs_tabs = QTabWidget()
         self.docs_tabs.setUsesScrollButtons(True)
         self.docs_tabs.addTab(self.wrap_in_scroll(self.build_counseling_workspace()), "상담일지 작성")
+        self.case_forms_panel = CaseFormsPanel(self.db)
+        self.docs_tabs.addTab(self.wrap_in_scroll(self.case_forms_panel), "사례관리 서류 작성")
         self.docs_tabs.addTab(self.wrap_in_scroll(self.create_documents_page()), "서류 보관함")
         self.docs_tabs.setCurrentIndex(DOCS_TAB_WRITE)
         self.docs_tabs.currentChanged.connect(self.on_docs_tab_changed)
@@ -1156,7 +1170,9 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
         """탭을 옮길 때마다 대상자 목록과 서류 목록을 최신 상태로 맞춘다."""
         if index == DOCS_TAB_WRITE:
             self.refresh_ai_client_combo()
-        else:
+        elif index == DOCS_TAB_CASE_FORMS:
+            self.case_forms_panel.refresh_clients()
+        elif index == DOCS_TAB_VAULT:
             self.populate_doc_client_filter()
             self.refresh_documents_table()
 
@@ -1992,6 +2008,8 @@ class MainWindow(CounselingWorkspaceMixin, QMainWindow):
         self.refresh_clients_table()
         if hasattr(self, "case_management_page"):
             self.case_management_page.set_database(self.db)
+        if hasattr(self, "case_forms_panel"):
+            self.case_forms_panel.set_database(self.db)
         self.refresh_ai_client_combo()
         self.refresh_template_combo()
         self.populate_doc_client_filter()
