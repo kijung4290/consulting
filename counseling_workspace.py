@@ -88,10 +88,6 @@ class CounselingWorkspaceMixin:
         options_layout.addWidget(self.detail_combo, 0, 1)
         options_layout.addWidget(QLabel('성명'), 1, 0)
         options_layout.addWidget(self.name_input, 1, 1)
-        self.mask_checkbox = QCheckBox('개인정보 마스킹 적용')
-        self.mask_checkbox.setChecked(True)
-        self.mask_checkbox.setToolTip('성명·주민번호·전화번호·주소 패턴을 가립니다. 결과를 직접 확인하세요.')
-        options_layout.addWidget(self.mask_checkbox, 2, 0, 1, 2)
         left.addWidget(options)
         options.hide()
         options_toggle.toggled.connect(options.setVisible)
@@ -111,6 +107,13 @@ class CounselingWorkspaceMixin:
         self.sample_btn.clicked.connect(self.load_sample_memo)
         memo_tools.addWidget(self.sample_btn)
         left.addLayout(memo_tools)
+        self.mask_checkbox = QCheckBox()
+        self.mask_checkbox.setChecked(True)
+        self.mask_checkbox.setToolTip(
+            'ON이면 성명·주민번호·전화번호·이메일·계좌번호·상세주소 패턴을 가린 뒤 AI가 처리합니다.')
+        self.mask_checkbox.toggled.connect(self.update_mask_option_label)
+        self.update_mask_option_label(True)
+        left.addWidget(self.mask_checkbox)
         run_row = QHBoxLayout()
         self.generate_btn = set_button_role(QPushButton('AI로 초안 정리'), 'primary')
         self.generate_btn.setToolTip('Ctrl+Enter · 작성 화면에서 실행')
@@ -186,6 +189,11 @@ class CounselingWorkspaceMixin:
                        self.name_input.textChanged, self.mask_checkbox.toggled):
             signal.connect(self.counseling_changed)
         return page
+
+    def update_mask_option_label(self, enabled):
+        self.mask_checkbox.setText(
+            '개인정보 마스킹: ON (권장)' if enabled
+            else '개인정보 마스킹: OFF (원문 그대로 AI 처리)')
 
     def counseling_state(self):
         return dict(memo=self.input_text.toPlainText(), html=self.output_text.toHtml(),

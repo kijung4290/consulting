@@ -63,6 +63,32 @@ class CounselingUXTests(unittest.TestCase):
         self.assertEqual(self.window.session_date_input.date(), QDate(2026, 9, 1))
         self.assertIn('font-weight:700', self.window.output_text.toHtml())
 
+    def test_masking_option_is_visible_and_controls_ai_input(self):
+        w = self.window
+        w.switch_to_ai_counsel_with_client(self.first)
+        w.input_text.setPlainText('가상 대상자 하나의 연락처는 010-1234-5678')
+
+        self.assertTrue(w.mask_checkbox.isVisibleTo(w))
+        self.assertIn('ON', w.mask_checkbox.text())
+        with patch.object(w, 'model_ready', return_value=True), \
+                patch.object(w.engine, 'is_loaded', return_value=True), \
+                patch.object(w, 'begin_generation') as begin:
+            w.start_generation()
+        masked_prompt = begin.call_args.args[0]
+        self.assertNotIn('가상 대상자 하나', masked_prompt)
+        self.assertNotIn('010-1234-5678', masked_prompt)
+
+        w.mask_checkbox.setChecked(False)
+        self.assertIn('OFF', w.mask_checkbox.text())
+        with patch.object(w, 'model_ready', return_value=True), \
+                patch.object(w.engine, 'is_loaded', return_value=True), \
+                patch.object(w, 'begin_generation') as begin:
+            w.start_generation()
+        original_prompt = begin.call_args.args[0]
+        self.assertIn('가상 대상자 하나', original_prompt)
+        self.assertIn('010-1234-5678', original_prompt)
+        self.assertIn('마스킹 해제됨', w.mask_stat_label.text())
+
     def test_save_is_idempotent_and_edits_update_original(self):
         w = self.window
         w.switch_to_ai_counsel_with_client(self.first)
